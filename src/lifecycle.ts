@@ -16,7 +16,9 @@ const TASK_SWEEP_INTERVAL_MS = 10_000;
 
 export async function startServer(): Promise<void> {
   const peerId = generateId();
-  const peerName = process.env.CROSSCHAT_NAME || `peer-${peerId.slice(0, 8)}`;
+  const cwd = process.env.CROSSCHAT_CWD || process.cwd();
+  const dirName = cwd.split('/').filter(Boolean).pop() || 'unknown';
+  const peerName = process.env.CROSSCHAT_NAME || `${dirName}-${peerId.slice(0, 4)}`;
 
   log(`Starting CrossChat server: ${peerName} (${peerId})`);
 

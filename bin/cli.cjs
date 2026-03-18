@@ -11,11 +11,6 @@ const SERVER_ENTRY = path.join(__dirname, "..", "dist", "index.js");
 const MCP_KEY = "crosschat";
 
 const command = process.argv[2];
-const nameArg = process.argv.indexOf("--name");
-const instanceName =
-  nameArg !== -1 && process.argv[nameArg + 1]
-    ? process.argv[nameArg + 1]
-    : undefined;
 
 function readSettings(filePath) {
   if (!fs.existsSync(filePath)) return {};
@@ -34,17 +29,6 @@ function writeSettings(filePath, settings) {
   fs.writeFileSync(filePath, JSON.stringify(settings, null, 2) + "\n", "utf8");
 }
 
-function buildMcpEntry(name) {
-  const entry = {
-    command: "node",
-    args: [SERVER_ENTRY],
-  };
-  if (name) {
-    entry.env = { CROSSCHAT_NAME: name };
-  }
-  return entry;
-}
-
 function install() {
   // Check dist/index.js exists
   if (!fs.existsSync(SERVER_ENTRY)) {
@@ -60,7 +44,10 @@ function install() {
   }
 
   const isUpdate = !!settings.mcpServers[MCP_KEY];
-  settings.mcpServers[MCP_KEY] = buildMcpEntry(instanceName);
+  settings.mcpServers[MCP_KEY] = {
+    command: "node",
+    args: [SERVER_ENTRY],
+  };
   writeSettings(targetPath, settings);
 
   if (isUpdate) {
@@ -71,9 +58,13 @@ function install() {
 
   console.log("");
   console.log("  Server: " + SERVER_ENTRY);
-  if (instanceName) {
-    console.log("  Name:   " + instanceName);
-  }
+  console.log("");
+  console.log(
+    "Each instance auto-names itself from its working directory (e.g., my-project-a1b2)."
+  );
+  console.log(
+    "To override, set CROSSCHAT_NAME in the env block of your MCP config."
+  );
   console.log("");
   console.log("Restart Claude Code, then tell Claude:");
   console.log('  "Start CrossChat as orchestrator"');
@@ -121,9 +112,6 @@ function status() {
   if (globalConfigured) {
     const entry = globalSettings.mcpServers[MCP_KEY];
     console.log("  Server: " + (entry.args ? entry.args[0] : "unknown"));
-    if (entry.env && entry.env.CROSSCHAT_NAME) {
-      console.log("  Name:   " + entry.env.CROSSCHAT_NAME);
-    }
   }
 
   console.log(
@@ -132,9 +120,6 @@ function status() {
   if (projectConfigured) {
     const entry = projectSettings.mcpServers[MCP_KEY];
     console.log("  Server: " + (entry.args ? entry.args[0] : "unknown"));
-    if (entry.env && entry.env.CROSSCHAT_NAME) {
-      console.log("  Name:   " + entry.env.CROSSCHAT_NAME);
-    }
   }
 
   // Check for active peers
@@ -151,12 +136,21 @@ function status() {
           const entry = JSON.parse(
             fs.readFileSync(path.join(peersDir, file), "utf8")
           );
-          const status = entry.status || "available";
+          const peerStatus = entry.status || "available";
           const detail = entry.statusDetail
             ? " (" + entry.statusDetail + ")"
             : "";
+          const cwd = entry.metadata && entry.metadata.cwd
+            ? " — " + entry.metadata.cwd
+            : "";
           console.log(
-            "  " + entry.name + " [" + status + detail + "] — " + entry.peerId
+            "  " +
+              entry.name +
+              " [" +
+              peerStatus +
+              detail +
+              "]" +
+              cwd
           );
         } catch {
           // skip malformed
@@ -182,34 +176,26 @@ function showHelp() {
   console.log("MCP server for inter-instance Claude Code communication");
   console.log("");
   console.log("Usage:");
-  console.log(
-    "  crosschat install [--name <name>] [--project]   Install MCP server config"
-  );
-  console.log(
-    "  crosschat uninstall [--project]                  Remove MCP server config"
-  );
-  console.log(
-    "  crosschat status                                 Show config and active peers"
-  );
-  console.log(
-    "  crosschat --version                              Show version"
-  );
-  console.log(
-    "  crosschat --help                                 Show this help"
-  );
+  console.log("  crosschat install [--project]   Install MCP server config");
+  console.log("  crosschat uninstall [--project]  Remove MCP server config");
+  console.log("  crosschat status                 Show config and active peers");
+  console.log("  crosschat --version              Show version");
+  console.log("  crosschat --help                 Show this help");
   console.log("");
   console.log("Options:");
   console.log(
-    "  --name <name>   Set the instance name (e.g., orchestrator, frontend-worker)"
+    "  --project   Use project-level settings (.claude/settings.json in cwd)"
   );
+  console.log("              Default: global (~/.claude/settings.json)");
+  console.log("");
+  console.log("Instances auto-name from their working directory at runtime.");
   console.log(
-    "  --project       Use project-level settings (.claude/settings.json in cwd)"
+    "To override, set CROSSCHAT_NAME in the env block of your MCP config."
   );
-  console.log("                  Default: global (~/.claude/settings.json)");
   console.log("");
   console.log("Examples:");
-  console.log("  crosschat install --name orchestrator");
-  console.log("  crosschat install --name api-worker --project");
+  console.log("  crosschat install");
+  console.log("  crosschat install --project");
   console.log("  crosschat status");
   console.log("  crosschat uninstall");
 }
