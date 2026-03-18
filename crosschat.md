@@ -6,9 +6,26 @@ description: Start CrossChat — discover and collaborate with other Claude Code
 
 CrossChat lets you talk to other Claude Code instances running on this machine. You can discover them, send messages, delegate tasks, and listen for incoming work.
 
-## What to do now
+## First: check that CrossChat tools are available
 
-Do these steps immediately:
+Before doing anything else, check if you have access to the `list_peers` tool. If you do, skip to "Getting started" below.
+
+If the CrossChat tools (`list_peers`, `send_message`, `get_messages`, `delegate_task`, `get_task_status`, `wait_for_messages`, `set_status`) are NOT available as MCP tools in this session, tell the user:
+
+> CrossChat tools are not available in this session. This means the CrossChat MCP server isn't running.
+>
+> To fix this:
+> 1. Make sure CrossChat is installed: run `npx @studiomopoke/crosschat install` in your terminal
+> 2. Restart Claude Code (close and reopen this session)
+> 3. Run /crosschat again
+>
+> The MCP server starts automatically when Claude Code launches — but only if the config is in place and Claude Code has been restarted since installing.
+
+Then stop — don't try to proceed without the tools.
+
+## Getting started
+
+Do these steps now:
 
 ### 1. Discover peers
 
@@ -18,7 +35,7 @@ Call `list_peers` with `includeMetadata=true`. This shows all other CrossChat in
 - A **status** (`available` or `busy`)
 - A **metadata.cwd** (the directory they're working in)
 
-Tell the user who's out there. If no one is found, let them know they need to open another Claude Code session.
+Tell the user who's out there. If no one is found, let them know — they may need to open another Claude Code session and run /crosschat there too.
 
 ### 2. Set up a message listener
 

@@ -8,7 +8,6 @@ const pkg = require("../package.json");
 
 const SETTINGS_GLOBAL = path.join(os.homedir(), ".claude", "settings.json");
 const COMMANDS_DIR = path.join(os.homedir(), ".claude", "commands");
-const SERVER_ENTRY = path.join(__dirname, "..", "dist", "index.js");
 const COMMAND_SOURCE = path.join(__dirname, "..", "crosschat.md");
 const COMMAND_TARGET = path.join(COMMANDS_DIR, "crosschat.md");
 const MCP_KEY = "crosschat";
@@ -36,12 +35,34 @@ function writeSettings(filePath, settings) {
   fs.writeFileSync(filePath, JSON.stringify(settings, null, 2) + "\n", "utf8");
 }
 
-function install() {
-  // Check dist/index.js exists
-  if (!fs.existsSync(SERVER_ENTRY)) {
-    console.error("Error: dist/index.js not found. Run 'npm run build' first.");
-    process.exit(1);
+function resolveServerEntry() {
+  // Try to find the server in common locations
+  const candidates = [
+    // Global install
+    path.join(__dirname, "..", "dist", "index.js"),
+    // npm root -g based
+    path.join(
+      process.env.npm_config_prefix || "/usr/local",
+      "lib",
+      "node_modules",
+      "@studiomopoke",
+      "crosschat",
+      "dist",
+      "index.js"
+    ),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
   }
+
+  return null;
+}
+
+function install() {
+  const serverEntry = resolveServerEntry();
 
   // 1. Install MCP server config
   const targetPath = getTargetSettingsPath();
@@ -52,10 +73,21 @@ function install() {
   }
 
   const isUpdate = !!settings.mcpServers[MCP_KEY];
-  settings.mcpServers[MCP_KEY] = {
-    command: "node",
-    args: [SERVER_ENTRY],
-  };
+
+  if (serverEntry) {
+    // Direct path — works for global installs and local dev
+    settings.mcpServers[MCP_KEY] = {
+      command: "node",
+      args: [serverEntry],
+    };
+  } else {
+    // Fallback to npx — works when installed via npx
+    settings.mcpServers[MCP_KEY] = {
+      command: "npx",
+      args: ["-y", "@studiomopoke/crosschat", "serve"],
+    };
+  }
+
   writeSettings(targetPath, settings);
 
   // 2. Install /crosschat command
@@ -69,6 +101,12 @@ function install() {
   }
 
   console.log("Installed /crosschat command to " + COMMAND_TARGET);
+  console.log("");
+  if (serverEntry) {
+    console.log("  MCP server: " + serverEntry);
+  } else {
+    console.log("  MCP server: via npx @studiomopoke/crosschat serve");
+  }
   console.log("");
   console.log("Restart Claude Code, then run /crosschat to start collaborating.");
 }
@@ -102,6 +140,22 @@ function uninstall() {
   }
 }
 
+function serve() {
+  // MCP server entry point — used when config calls `npx crosschat serve`
+  const serverPath = path.join(__dirname, "..", "dist", "index.js");
+  if (!fs.existsSync(serverPath)) {
+    console.error("Error: dist/index.js not found.");
+    process.exit(1);
+  }
+  // Dynamic import of ESM module
+  import(
+    "file://" + serverPath
+  ).catch((err) => {
+    console.error("Failed to start CrossChat server:", err.message);
+    process.exit(1);
+  });
+}
+
 function status() {
   const globalSettings = readSettings(SETTINGS_GLOBAL);
   const globalConfigured = !!(
@@ -119,7 +173,8 @@ function status() {
   console.log("CrossChat v" + pkg.version);
   console.log("");
   console.log(
-    "MCP server:     " + (globalConfigured || projectConfigured ? "installed" : "not installed")
+    "MCP server:     " +
+      (globalConfigured || projectConfigured ? "installed" : "not installed")
   );
   console.log(
     "/crosschat cmd: " + (commandInstalled ? "installed" : "not installed")
@@ -174,13 +229,19 @@ function showHelp() {
   console.log("MCP server for inter-instance Claude Code communication");
   console.log("");
   console.log("Usage:");
-  console.log("  crosschat install [--project]   Install MCP server + /crosschat command");
+  console.log(
+    "  crosschat install [--project]   Install MCP server + /crosschat command"
+  );
   console.log("  crosschat uninstall [--project]  Remove everything");
-  console.log("  crosschat status                 Show config and active peers");
+  console.log(
+    "  crosschat status                 Show config and active peers"
+  );
   console.log("  crosschat --version              Show version");
   console.log("  crosschat --help                 Show this help");
   console.log("");
-  console.log("After installing, restart Claude Code and run /crosschat to start.");
+  console.log(
+    "After installing, restart Claude Code and run /crosschat to start."
+  );
 }
 
 switch (command) {
@@ -191,6 +252,9 @@ switch (command) {
   case "uninstall":
   case "remove":
     uninstall();
+    break;
+  case "serve":
+    serve();
     break;
   case "status":
     status();
