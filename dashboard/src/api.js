@@ -23,6 +23,12 @@ export async function fetchMessages(roomId) {
   return res.json();
 }
 
+export async function fetchPeers() {
+  const res = await fetch(`${API_BASE}/peers`);
+  if (!res.ok) throw new Error('Failed to fetch peers');
+  return res.json();
+}
+
 export async function postMessage(roomId, username, text) {
   const res = await fetch(`${API_BASE}/rooms/${roomId}/messages`, {
     method: 'POST',

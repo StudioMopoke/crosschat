@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { generateId } from '../util/id.js';
 import { log, logError } from '../util/logger.js';
+import { listRegistryEntries } from '../registry/registry.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -23,6 +24,8 @@ interface ChatRoom {
   messages: ChatMessage[];
 }
 
+export type UserMessageCallback = (username: string, text: string, roomId: string) => void;
+
 export class DashboardServer {
   private app: express.Express;
   private server: http.Server | null = null;
@@ -30,6 +33,7 @@ export class DashboardServer {
   private rooms: Map<string, ChatRoom> = new Map();
   private clientRooms: WeakMap<WebSocket, Set<string>> = new WeakMap();
   private port: number;
+  private userMessageCallbacks: UserMessageCallback[] = [];
 
   constructor(port: number = 0) {
     this.port = port;
@@ -116,7 +120,25 @@ export class DashboardServer {
       };
       room.messages.push(message);
       this.broadcast({ type: 'message', ...message }, room.id);
+      this.notifyUserMessage(message.username, message.text, room.id);
       res.status(201).json(message);
+    });
+
+    // List connected peers
+    this.app.get('/api/peers', async (_req, res) => {
+      try {
+        const entries = await listRegistryEntries();
+        const peers = entries.map((e) => ({
+          peerId: e.peerId,
+          name: e.name,
+          status: e.status,
+          statusDetail: e.statusDetail,
+          cwd: e.metadata?.cwd,
+        }));
+        res.json(peers);
+      } catch {
+        res.status(500).json({ error: 'Failed to list peers' });
+      }
     });
 
     // Fallback to index.html for SPA routing
@@ -139,6 +161,21 @@ export class DashboardServer {
       }
       client.send(payload);
     });
+  }
+
+  /** Register a callback for messages posted by users via the dashboard UI */
+  onUserMessage(callback: UserMessageCallback): () => void {
+    this.userMessageCallbacks.push(callback);
+    return () => {
+      const idx = this.userMessageCallbacks.indexOf(callback);
+      if (idx !== -1) this.userMessageCallbacks.splice(idx, 1);
+    };
+  }
+
+  private notifyUserMessage(username: string, text: string, roomId: string): void {
+    for (const cb of this.userMessageCallbacks) {
+      cb(username, text, roomId);
+    }
   }
 
   /** Post a message to a room programmatically (used by the message bridge) */

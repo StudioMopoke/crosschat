@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { fetchRooms, createRoom, fetchMessages, postMessage } from './api';
+import { fetchRooms, createRoom, fetchMessages, postMessage, fetchPeers } from './api';
 import { useWebSocket } from './useWebSocket';
 import './App.css';
 
@@ -25,7 +25,28 @@ function UsernamePrompt({ onSubmit }) {
   );
 }
 
-function Sidebar({ rooms, activeRoomId, onSelectRoom, onCreateRoom }) {
+function PeersBar({ peers }) {
+  if (!peers.length) return null;
+  return (
+    <div className="peers-bar">
+      <div className="peers-label">Agents</div>
+      <div className="peers-list">
+        {peers.map((peer) => (
+          <div
+            key={peer.peerId}
+            className={`peer-icon ${peer.status}`}
+            title={`${peer.name}\n${peer.cwd || 'unknown directory'}\nStatus: ${peer.status}${peer.statusDetail ? ` — ${peer.statusDetail}` : ''}`}
+          >
+            <span className="peer-icon-letter">{peer.name.charAt(0).toUpperCase()}</span>
+            <span className={`peer-status-dot ${peer.status}`} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Sidebar({ rooms, activeRoomId, onSelectRoom, onCreateRoom, peers }) {
   const [newRoomName, setNewRoomName] = useState('');
   const [creating, setCreating] = useState(false);
 
@@ -43,6 +64,7 @@ function Sidebar({ rooms, activeRoomId, onSelectRoom, onCreateRoom }) {
       <div className="sidebar-header">
         <h1>CrossChat</h1>
       </div>
+      <PeersBar peers={peers} />
       <ul className="room-list">
         {rooms.map((room) => (
           <li
@@ -140,6 +162,7 @@ export default function App() {
   const [activeRoomId, setActiveRoomId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [events, setEvents] = useState([]);
+  const [peers, setPeers] = useState([]);
   const [error, setError] = useState(null);
 
   const activeRoomIdRef = useRef(activeRoomId);
@@ -180,6 +203,12 @@ export default function App() {
         }
       })
       .catch((err) => setError(err.message));
+
+    // Fetch peers and poll every 10 seconds
+    const loadPeers = () => fetchPeers().then(setPeers).catch(() => {});
+    loadPeers();
+    const peersInterval = setInterval(loadPeers, 10000);
+    return () => clearInterval(peersInterval);
   }, [username]);
 
   useEffect(() => {
@@ -211,7 +240,7 @@ export default function App() {
   const handleSendMessage = async (text) => {
     try {
       await postMessage(activeRoomId, username, text);
-      wsSend({ type: 'message', roomId: activeRoomId, username, text });
+      // HTTP POST handler broadcasts to WebSocket clients — no need to also send via WS
     } catch (err) {
       setError(err.message);
     }
@@ -235,6 +264,7 @@ export default function App() {
         activeRoomId={activeRoomId}
         onSelectRoom={setActiveRoomId}
         onCreateRoom={handleCreateRoom}
+        peers={peers}
       />
       <ChatArea
         room={activeRoom}

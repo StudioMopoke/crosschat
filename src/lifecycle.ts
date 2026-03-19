@@ -205,7 +205,7 @@ export async function startServer(): Promise<void> {
       const actualPort = await dashboard.start();
       await writeDashboardLock(actualPort);
 
-      bridge = new MessageBridge(messageStore, dashboard, peerName);
+      bridge = new MessageBridge(messageStore, dashboard, peerName, peerId);
       bridge.start();
 
       // Post a startup message to the dashboard
