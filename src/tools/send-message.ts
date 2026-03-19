@@ -13,8 +13,9 @@ export function registerSendMessage(server: McpServer, ownPeerId: string, ownNam
       targetPeerId: z.string().describe('The UUID of the target peer (from list_peers results)'),
       content: z.string().describe('The message text to send. Can include any content — questions, status updates, instructions, code snippets, etc.'),
       metadata: z.record(z.unknown()).optional().describe('Optional structured metadata to attach (e.g., { "urgency": "high", "topic": "refactor" }). The peer receives this alongside the message content.'),
+      replyToMessageId: z.string().optional().describe('The messageId of a message you are replying to. This threads the conversation so the peer can follow the exchange.'),
     },
-    async ({ targetPeerId, content, metadata }) => {
+    async ({ targetPeerId, content, metadata, replyToMessageId }) => {
       const entry = await readRegistryEntry(targetPeerId);
       if (!entry) {
         return {
@@ -30,6 +31,7 @@ export function registerSendMessage(server: McpServer, ownPeerId: string, ownNam
         content,
         metadata,
         sentAt: new Date().toISOString(),
+        replyToMessageId,
       };
 
       try {

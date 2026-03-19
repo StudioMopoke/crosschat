@@ -30,6 +30,8 @@ export interface PeerMessage {
   receivedAt: string;
   read: boolean;
   relatedTaskId?: string;
+  replyToMessageId?: string;
+  type?: 'message' | 'task_result' | 'task_delegated';
 }
 
 // === Tasks ===
@@ -84,6 +86,7 @@ export interface PeerMessageParams {
   metadata?: Record<string, unknown>;
   sentAt: string;
   relatedTaskId?: string;
+  replyToMessageId?: string;
 }
 
 export interface PeerDelegateTaskParams {

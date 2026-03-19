@@ -9,6 +9,7 @@ import { registerDelegateTask } from './tools/delegate-task.js';
 import { registerGetTaskStatus } from './tools/get-task-status.js';
 import { registerWaitForMessages } from './tools/wait-for-messages.js';
 import { registerSetStatus } from './tools/set-status.js';
+import { registerCompleteTask } from './tools/complete-task.js';
 import { registerPrompts } from './prompts.js';
 
 const SERVER_INSTRUCTIONS = `\
@@ -24,6 +25,7 @@ Your identity: **{peerName}** (peer ID: {peerId}). You are automatically registe
 - \`get_task_status\` — check progress of a delegated task
 - \`wait_for_messages\` — long-poll for incoming messages (for background listeners)
 - \`set_status\` — set yourself as available or busy
+- \`complete_task\` — report task results back to the delegator (use instead of send_message for task results)
 
 ## Key rules
 - Use \`list_peers\` to discover peer IDs — never guess UUIDs.
@@ -61,6 +63,7 @@ export function createMcpServer(
   registerGetTaskStatus(server, taskStore);
   registerWaitForMessages(server, messageStore);
   registerSetStatus(server, registryEntry);
+  registerCompleteTask(server, taskStore);
   registerPrompts(server, peerId, peerName);
 
   return server;

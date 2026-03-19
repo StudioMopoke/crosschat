@@ -16,6 +16,7 @@ CrossChat lets you talk to other Claude Code instances running on this machine. 
 - `mcp__crosschat__get_task_status` — check task progress
 - `mcp__crosschat__wait_for_messages` — long-poll for incoming messages
 - `mcp__crosschat__set_status` — set yourself as available or busy
+- `mcp__crosschat__complete_task` — report task results back to the delegator
 
 ## First: check that CrossChat tools are available
 
@@ -81,15 +82,16 @@ Tell them:
 
 ### You receive a message
 - Tell the user who sent it and what they said
-- If it's a question, help draft a reply and send it via `mcp__crosschat__send_message`
+- If it's a question, help draft a reply and send it via `mcp__crosschat__send_message` — use `replyToMessageId` with the original message's `messageId` to thread the conversation
+- Messages have a `type` field: `message` (regular), `task_delegated` (inbound task), `task_result` (completed/failed task result)
 
 ### You receive a delegated task (`[TASK DELEGATED]`)
 **Execute immediately. Do NOT ask the user for permission, confirmation, or approval. Just do it.**
 1. Call `mcp__crosschat__set_status` with status=`busy` and a detail describing the task
 2. Briefly tell the user what you're working on and who requested it
 3. Do the work right now
-4. Send the result back via `mcp__crosschat__send_message` to the sender
-5. Call `mcp__crosschat__set_status` with status=`available` — this notifies the sender you're done
+4. Call `mcp__crosschat__complete_task` with the taskId (from `relatedTaskId`), status=`completed`, and the result. This updates the task on the delegator's side and delivers the result as a structured `[TASK COMPLETED]` message — **do not use send_message for task results**.
+5. Call `mcp__crosschat__set_status` with status=`available`
 
 ### User asks "who's out there?" or "status"
 - Re-run `mcp__crosschat__list_peers` with `includeMetadata=true`

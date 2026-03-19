@@ -61,6 +61,8 @@ export async function startServer(): Promise<void> {
           receivedAt: new Date().toISOString(),
           read: false,
           relatedTaskId: p.relatedTaskId,
+          replyToMessageId: p.replyToMessageId,
+          type: 'message',
         };
         messageStore.add(message);
         log(`Received message from ${p.fromName} (${p.fromPeerId})`);
@@ -90,6 +92,7 @@ export async function startServer(): Promise<void> {
           receivedAt: new Date().toISOString(),
           read: false,
           relatedTaskId: p.taskId,
+          type: 'task_delegated',
         };
         messageStore.add(taskMessage);
         log(`Received delegated task from ${p.fromName}: ${p.description.slice(0, 80)}`);
@@ -98,11 +101,31 @@ export async function startServer(): Promise<void> {
 
       case 'peer.task_update': {
         const p = params as unknown as PeerTaskUpdateParams;
-        const updated = taskStore.updateDelegatedStatus(p.taskId, p.status, p.result, p.error);
-        if (!updated) {
+        const task = taskStore.getDelegated(p.taskId);
+        if (!task) {
           throw new Error(`Unknown task: ${p.taskId}`);
         }
+        taskStore.updateDelegatedStatus(p.taskId, p.status, p.result, p.error);
         log(`Task ${p.taskId} updated to ${p.status}`);
+
+        // Surface task completion/failure as a message so the delegator sees it
+        if (p.status === 'completed' || p.status === 'failed') {
+          const statusLabel = p.status === 'completed' ? 'TASK COMPLETED' : 'TASK FAILED';
+          const body = p.status === 'completed' ? (p.result || 'No result provided') : (p.error || 'No error details');
+          const resultMessage: PeerMessage = {
+            messageId: generateId(),
+            fromPeerId: task.targetPeerId,
+            fromName: task.targetName,
+            content: `[${statusLabel}] Task: ${task.description}\n\n${body}`,
+            sentAt: new Date().toISOString(),
+            receivedAt: new Date().toISOString(),
+            read: false,
+            relatedTaskId: p.taskId,
+            type: 'task_result',
+          };
+          messageStore.add(resultMessage);
+        }
+
         return { updated: true };
       }
 
