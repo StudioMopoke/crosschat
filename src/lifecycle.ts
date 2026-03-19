@@ -200,6 +200,7 @@ export async function startServer(): Promise<void> {
   let bridge: MessageBridge | null = null;
   let dashboardListener: DashboardListener | null = null;
   let dashboardPort: number | null = null;
+  let dashboardInfo: { port: number } | { error: string } | null = null;
   const existingLock = await readDashboardLock();
   if (!existingLock) {
     try {
@@ -208,6 +209,7 @@ export async function startServer(): Promise<void> {
       const actualPort = await dashboard.start();
       await writeDashboardLock(actualPort);
       dashboardPort = actualPort;
+      dashboardInfo = { port: actualPort };
 
       bridge = new MessageBridge(messageStore, dashboard);
       bridge.start();
@@ -215,11 +217,14 @@ export async function startServer(): Promise<void> {
       // Post a startup message to the dashboard
       dashboard.postToRoom('crosschat', 'system', `${peerName} started the dashboard on port ${actualPort}`);
     } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
       logError('Failed to start dashboard', err);
+      dashboardInfo = { error: errorMsg };
       dashboard = null;
     }
   } else {
     dashboardPort = existingLock.port;
+    dashboardInfo = { port: existingLock.port };
     log(`Dashboard already running on port ${existingLock.port} (pid ${existingLock.pid})`);
   }
 
@@ -230,7 +235,7 @@ export async function startServer(): Promise<void> {
   }
 
   // 8. Create and connect MCP server
-  const mcpServer = createMcpServer(peerId, peerName, messageStore, taskStore, entry, dashboard);
+  const mcpServer = createMcpServer(peerId, peerName, messageStore, taskStore, entry, dashboard, dashboardInfo);
   const transport = new StdioServerTransport();
   await mcpServer.connect(transport);
 
@@ -277,6 +282,7 @@ export async function startServer(): Promise<void> {
 
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+  process.on('SIGHUP', shutdown);
   process.stdin.on('end', shutdown);
 
   log(`CrossChat server ready: ${peerName} (${peerId})`);

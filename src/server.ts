@@ -30,6 +30,9 @@ Your identity: **{peerName}** (peer ID: {peerId}). You are automatically registe
 - \`complete_task\` — report task results back to the delegator (use instead of send_message for task results)
 - \`chat_send_message\` — post a message to the dashboard UI (if dashboard is running)
 
+## Dashboard
+{dashboardInfo}
+
 ## Key rules
 - Use \`list_peers\` to discover peer IDs — never guess UUIDs.
 - Check a peer's status before delegating — don't send work to busy peers.
@@ -45,11 +48,22 @@ export function createMcpServer(
   messageStore: MessageStore,
   taskStore: TaskStore,
   registryEntry: PeerRegistryEntry,
-  dashboard: DashboardServer | null
+  dashboard: DashboardServer | null,
+  dashboardInfo: { port: number } | { error: string } | null
 ): McpServer {
+  let dashboardInfoStr: string;
+  if (dashboardInfo && 'port' in dashboardInfo) {
+    dashboardInfoStr = `Running at http://localhost:${dashboardInfo.port}`;
+  } else if (dashboardInfo && 'error' in dashboardInfo) {
+    dashboardInfoStr = `Failed to start: ${dashboardInfo.error}`;
+  } else {
+    dashboardInfoStr = 'Not available';
+  }
+
   const instructions = SERVER_INSTRUCTIONS
     .replace('{peerName}', peerName)
-    .replace('{peerId}', peerId);
+    .replace('{peerId}', peerId)
+    .replace('{dashboardInfo}', dashboardInfoStr);
 
   const server = new McpServer(
     {
