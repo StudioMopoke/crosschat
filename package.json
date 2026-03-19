@@ -8,6 +8,7 @@
     "crosschat": "bin/cli.cjs"
   },
   "files": [
+    "agents/",
     "bin/",
     "dist/",
     "crosschat.md",

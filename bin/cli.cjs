@@ -6,10 +6,13 @@ const os = require("os");
 
 const pkg = require("../package.json");
 
-const SETTINGS_GLOBAL = path.join(os.homedir(), ".claude", "settings.json");
+const CLAUDE_JSON = path.join(os.homedir(), ".claude.json");
 const COMMANDS_DIR = path.join(os.homedir(), ".claude", "commands");
+const AGENTS_DIR = path.join(os.homedir(), ".claude", "agents");
 const COMMAND_SOURCE = path.join(__dirname, "..", "crosschat.md");
 const COMMAND_TARGET = path.join(COMMANDS_DIR, "crosschat.md");
+const AGENT_SOURCE = path.join(__dirname, "..", "agents", "crosschat-listener.md");
+const AGENT_TARGET = path.join(AGENTS_DIR, "crosschat-listener.md");
 const MCP_KEY = "crosschat";
 
 const command = process.argv[2];
@@ -64,43 +67,47 @@ function resolveServerEntry() {
 function install() {
   const serverEntry = resolveServerEntry();
 
-  // 1. Install MCP server config
-  const targetPath = getTargetSettingsPath();
-  const settings = readSettings(targetPath);
+  // 1. Install MCP server config to ~/.claude.json
+  const claudeJson = readSettings(CLAUDE_JSON);
 
-  if (!settings.mcpServers) {
-    settings.mcpServers = {};
+  if (!claudeJson.mcpServers) {
+    claudeJson.mcpServers = {};
   }
 
-  const isUpdate = !!settings.mcpServers[MCP_KEY];
+  const isUpdate = !!claudeJson.mcpServers[MCP_KEY];
 
   if (serverEntry) {
     // Direct path — works for global installs and local dev
-    settings.mcpServers[MCP_KEY] = {
+    claudeJson.mcpServers[MCP_KEY] = {
       command: "node",
       args: [serverEntry],
     };
   } else {
     // Fallback to npx — works when installed via npx
-    settings.mcpServers[MCP_KEY] = {
+    claudeJson.mcpServers[MCP_KEY] = {
       command: "npx",
       args: ["-y", "@studiomopoke/crosschat", "serve"],
     };
   }
 
-  writeSettings(targetPath, settings);
+  writeSettings(CLAUDE_JSON, claudeJson);
 
   // 2. Install /crosschat command
   ensureDir(COMMANDS_DIR);
   fs.copyFileSync(COMMAND_SOURCE, COMMAND_TARGET);
 
+  // 3. Install crosschat-listener agent
+  ensureDir(AGENTS_DIR);
+  fs.copyFileSync(AGENT_SOURCE, AGENT_TARGET);
+
   if (isUpdate) {
-    console.log("Updated CrossChat in " + targetPath);
+    console.log("Updated CrossChat in " + CLAUDE_JSON);
   } else {
-    console.log("Installed CrossChat to " + targetPath);
+    console.log("Installed CrossChat MCP server to " + CLAUDE_JSON);
   }
 
   console.log("Installed /crosschat command to " + COMMAND_TARGET);
+  console.log("Installed crosschat-listener agent to " + AGENT_TARGET);
   console.log("");
   if (serverEntry) {
     console.log("  MCP server: " + serverEntry);
@@ -112,30 +119,35 @@ function install() {
 }
 
 function uninstall() {
-  // 1. Remove MCP server config
-  const targetPath = getTargetSettingsPath();
-  const settings = readSettings(targetPath);
-  let removedConfig = false;
+  let removedAnything = false;
 
-  if (settings.mcpServers && settings.mcpServers[MCP_KEY]) {
-    delete settings.mcpServers[MCP_KEY];
-    if (Object.keys(settings.mcpServers).length === 0) {
-      delete settings.mcpServers;
+  // 1. Remove MCP server config from ~/.claude.json
+  const claudeJson = readSettings(CLAUDE_JSON);
+  if (claudeJson.mcpServers && claudeJson.mcpServers[MCP_KEY]) {
+    delete claudeJson.mcpServers[MCP_KEY];
+    if (Object.keys(claudeJson.mcpServers).length === 0) {
+      delete claudeJson.mcpServers;
     }
-    writeSettings(targetPath, settings);
-    console.log("Removed CrossChat MCP server from " + targetPath);
-    removedConfig = true;
+    writeSettings(CLAUDE_JSON, claudeJson);
+    console.log("Removed CrossChat MCP server from " + CLAUDE_JSON);
+    removedAnything = true;
   }
 
   // 2. Remove /crosschat command
-  let removedCommand = false;
   if (fs.existsSync(COMMAND_TARGET)) {
     fs.unlinkSync(COMMAND_TARGET);
-    console.log("Removed /crosschat command from " + COMMAND_TARGET);
-    removedCommand = true;
+    console.log("Removed /crosschat command");
+    removedAnything = true;
   }
 
-  if (!removedConfig && !removedCommand) {
+  // 3. Remove crosschat-listener agent
+  if (fs.existsSync(AGENT_TARGET)) {
+    fs.unlinkSync(AGENT_TARGET);
+    console.log("Removed crosschat-listener agent");
+    removedAnything = true;
+  }
+
+  if (!removedAnything) {
     console.log("CrossChat is not installed — nothing to remove.");
   }
 }
@@ -157,28 +169,18 @@ function serve() {
 }
 
 function status() {
-  const globalSettings = readSettings(SETTINGS_GLOBAL);
-  const globalConfigured = !!(
-    globalSettings.mcpServers && globalSettings.mcpServers[MCP_KEY]
+  const claudeJson = readSettings(CLAUDE_JSON);
+  const mcpConfigured = !!(
+    claudeJson.mcpServers && claudeJson.mcpServers[MCP_KEY]
   );
-
-  const projectPath = path.join(process.cwd(), ".claude", "settings.json");
-  const projectSettings = readSettings(projectPath);
-  const projectConfigured = !!(
-    projectSettings.mcpServers && projectSettings.mcpServers[MCP_KEY]
-  );
-
   const commandInstalled = fs.existsSync(COMMAND_TARGET);
+  const agentInstalled = fs.existsSync(AGENT_TARGET);
 
   console.log("CrossChat v" + pkg.version);
   console.log("");
-  console.log(
-    "MCP server:     " +
-      (globalConfigured || projectConfigured ? "installed" : "not installed")
-  );
-  console.log(
-    "/crosschat cmd: " + (commandInstalled ? "installed" : "not installed")
-  );
+  console.log("MCP server:     " + (mcpConfigured ? "installed" : "not installed"));
+  console.log("/crosschat cmd: " + (commandInstalled ? "installed" : "not installed"));
+  console.log("listener agent: " + (agentInstalled ? "installed" : "not installed"));
 
   // Check for active peers
   const peersDir = path.join(os.homedir(), ".crosschat", "peers");

@@ -41,14 +41,13 @@ Tell the user who's out there. If no one is found, let them know — they may ne
 
 ### 2. Set up a message listener
 
-You won't be notified when messages arrive unless you're listening. Set up a background listener:
+You won't be notified when messages arrive unless you're listening. Use the `crosschat-listener` sub-agent to watch for messages in the background:
 
-1. Spawn a background sub-agent (use Haiku — cheapest model).
-2. The sub-agent's only job: `Call the mcp__crosschat__wait_for_messages tool with timeoutMs=60000. Return the full result as-is.`
-3. When the sub-agent completes:
-   - **Message received**: Tell the user who sent it and what it says. If it's a delegated task (`[TASK DELEGATED]`), describe the task and ask if they want you to do it. Spawn a new listener.
-   - **Timeout**: Spawn a new listener silently. Don't mention timeouts.
-4. Keep this loop going until the user says stop.
+1. Spawn the `crosschat-listener` agent in the background using the Agent tool with `subagent_type: "crosschat-listener"` and `run_in_background: true`. Give it a simple prompt like `"Listen for CrossChat messages."`.
+2. When the agent completes and you're notified:
+   - **Message received** (`received: true`): Tell the user who sent it and what it says. If it's a delegated task (`[TASK DELEGATED]`), describe the task and ask if they want you to do it. Spawn a new listener.
+   - **Timeout** (`received: false`): Spawn a new listener silently. Don't mention timeouts.
+3. Keep this loop going until the user says stop.
 
 ### 3. Announce yourself
 
