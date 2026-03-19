@@ -1,6 +1,6 @@
 {
   "name": "@studiomopoke/crosschat",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "description": "MCP server for inter-instance Claude Code communication",
   "type": "module",
   "main": "dist/index.js",
