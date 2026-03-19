@@ -58,6 +58,8 @@ interface ChatMessage {
   metadata?: Record<string, unknown>;
   timestamp: string;
   source: 'agent' | 'user';
+  mentions?: string[];       // mentioned agent names (e.g., ["crosschat-20cd"])
+  mentionType?: 'direct' | 'here' | 'broadcast';  // how the message is targeted
 }
 
 interface Room {
@@ -113,7 +115,7 @@ async function removeDashboardLock(): Promise<void> {
 // ── Version from package.json ────────────────────────────────────────
 
 function getServerVersion(): string {
-  return '0.6.2';
+  return '1.2.0';
 }
 
 // ── Hub Server ───────────────────────────────────────────────────────
@@ -212,6 +214,50 @@ export async function startHub(): Promise<void> {
     };
   }
 
+  // ── Mention parsing ──────────────────────────────────────────
+
+  /**
+   * Parse @mentions from message content.
+   * Supports @agent-name (targeted) and @here (room broadcast).
+   * Returns the list of mentioned agent names and the mention type.
+   */
+  function parseMentions(content: string): { mentions: string[]; mentionType: 'direct' | 'here' | 'broadcast' } {
+    const hasHere = /@here\b/i.test(content);
+    if (hasHere) {
+      return { mentions: [], mentionType: 'here' };
+    }
+
+    // Extract all @mentions from the content
+    const mentionPattern = /@([\w-]+)/g;
+    const rawMentions: string[] = [];
+    let match: RegExpExecArray | null;
+    while ((match = mentionPattern.exec(content)) !== null) {
+      rawMentions.push(match[1]);
+    }
+
+    if (rawMentions.length === 0) {
+      return { mentions: [], mentionType: 'broadcast' };
+    }
+
+    // Resolve mentions against known agent names (case-insensitive)
+    const resolvedNames: string[] = [];
+    for (const agent of agents.values()) {
+      const agentNameLower = agent.name.toLowerCase();
+      for (const mention of rawMentions) {
+        if (mention.toLowerCase() === agentNameLower) {
+          resolvedNames.push(agent.name);
+        }
+      }
+    }
+
+    if (resolvedNames.length > 0) {
+      return { mentions: resolvedNames, mentionType: 'direct' };
+    }
+
+    // Mentions didn't match any known agents — treat as broadcast
+    return { mentions: [], mentionType: 'broadcast' };
+  }
+
   // ── Broadcasting ───────────────────────────────────────────────
 
   /** Broadcast a server message to all agents in a specific room. */
@@ -245,9 +291,9 @@ export async function startHub(): Promise<void> {
     }
   }
 
-  /** Broadcast a room message to all agents AND browsers in the room. */
+  /** Broadcast a room message to agents AND browsers in the room, with mention filtering. */
   function broadcastRoomMessage(roomId: string, msg: ChatMessage, excludePeerId?: string): void {
-    // Send to agents as a room.message protocol message
+    // Build the protocol message for agents
     const agentMsg: ServerMessage = {
       type: 'room.message',
       roomId: msg.roomId,
@@ -258,10 +304,26 @@ export async function startHub(): Promise<void> {
       metadata: msg.metadata,
       timestamp: msg.timestamp,
       source: msg.source,
+      mentions: msg.mentions,
+      mentionType: msg.mentionType,
     };
-    broadcastToRoomAgents(roomId, agentMsg, excludePeerId);
 
-    // Send to browsers in the existing dashboard format
+    if (msg.mentionType === 'direct' && msg.mentions && msg.mentions.length > 0) {
+      // Direct mention: only deliver to mentioned agents (+ sender echo)
+      const mentionedNamesLower = new Set(msg.mentions.map((n) => n.toLowerCase()));
+      for (const agent of agents.values()) {
+        if (agent.currentRoom !== roomId) continue;
+        if (agent.peerId === excludePeerId) continue;
+        if (mentionedNamesLower.has(agent.name.toLowerCase()) || agent.peerId === msg.fromPeerId) {
+          sendToWs(agent.ws, agentMsg);
+        }
+      }
+    } else {
+      // @here or broadcast: deliver to all agents in the room
+      broadcastToRoomAgents(roomId, agentMsg, excludePeerId);
+    }
+
+    // Always send to all browsers — dashboard users see everything
     broadcastToRoomBrowsers(roomId, {
       type: 'message',
       messageId: msg.messageId,
@@ -270,6 +332,8 @@ export async function startHub(): Promise<void> {
       text: msg.content,
       timestamp: msg.timestamp,
       source: msg.source,
+      mentions: msg.mentions,
+      mentionType: msg.mentionType,
     });
   }
 
@@ -356,6 +420,8 @@ export async function startHub(): Promise<void> {
       return;
     }
 
+    const { mentions, mentionType } = parseMentions(msg.content);
+
     const chatMsg: ChatMessage = {
       messageId: generateId(),
       roomId,
@@ -365,10 +431,12 @@ export async function startHub(): Promise<void> {
       metadata: msg.metadata,
       timestamp: new Date().toISOString(),
       source: 'agent',
+      mentions: mentions.length > 0 ? mentions : undefined,
+      mentionType,
     };
 
     room.messages.push(chatMsg);
-    // Broadcast to everyone in the room (including the sender, so they get the messageId echo)
+    // Broadcast with mention-based filtering
     broadcastRoomMessage(roomId, chatMsg);
   }
 
@@ -663,6 +731,8 @@ export async function startHub(): Promise<void> {
       text: m.content,
       timestamp: m.timestamp,
       source: m.source,
+      mentions: m.mentions,
+      mentionType: m.mentionType,
     }));
     res.json(messages);
   });
@@ -679,19 +749,24 @@ export async function startHub(): Promise<void> {
       return;
     }
 
+    const content = (text as string).trim();
+    const { mentions, mentionType } = parseMentions(content);
+
     const chatMsg: ChatMessage = {
       messageId: generateId(),
       roomId: room.id,
       fromPeerId: 'dashboard-user',
       fromName: (username as string).trim(),
-      content: (text as string).trim(),
+      content,
       metadata: undefined,
       timestamp: new Date().toISOString(),
       source: 'user',
+      mentions: mentions.length > 0 ? mentions : undefined,
+      mentionType,
     };
     room.messages.push(chatMsg);
 
-    // Broadcast to agents in this room
+    // Broadcast to agents in this room (with mention filtering)
     broadcastRoomMessage(room.id, chatMsg);
 
     res.status(201).json({
@@ -701,6 +776,8 @@ export async function startHub(): Promise<void> {
       text: chatMsg.content,
       timestamp: chatMsg.timestamp,
       source: chatMsg.source,
+      mentions: chatMsg.mentions,
+      mentionType: chatMsg.mentionType,
     });
   });
 
@@ -904,19 +981,24 @@ export async function startHub(): Promise<void> {
           const room = rooms.get(data.roomId as string);
           if (!room || !data.username || !data.text) return;
 
+          const wsContent = (data.text as string).trim();
+          const { mentions: wsMentions, mentionType: wsMentionType } = parseMentions(wsContent);
+
           const chatMsg: ChatMessage = {
             messageId: generateId(),
             roomId: room.id,
             fromPeerId: 'dashboard-user',
             fromName: (data.username as string).trim(),
-            content: (data.text as string).trim(),
+            content: wsContent,
             metadata: undefined,
             timestamp: new Date().toISOString(),
             source: 'user',
+            mentions: wsMentions.length > 0 ? wsMentions : undefined,
+            mentionType: wsMentionType,
           };
           room.messages.push(chatMsg);
 
-          // Broadcast to all agents and browsers in this room
+          // Broadcast with mention filtering
           broadcastRoomMessage(room.id, chatMsg);
           break;
         }

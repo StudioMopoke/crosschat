@@ -12,4 +12,6 @@ export interface PeerMessage {
   relatedTaskId?: string;
   replyToMessageId?: string;
   type?: 'message' | 'task_result' | 'task_delegated';
+  mentions?: string[];       // mentioned agent names
+  mentionType?: 'direct' | 'here' | 'broadcast';
 }

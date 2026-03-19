@@ -24,11 +24,14 @@ All communication happens through rooms — you are in one room at a time (defau
 Your identity: **{peerName}** (peer ID: {peerId}). You are automatically registered and discoverable.
 
 ## Messaging
-- \`send_message\` — post a message to your current room (all agents in the room see it)
+- \`send_message\` — post a message to your current room
 - \`get_messages\` — read messages from your current room (use unreadOnly=true for new messages)
 - \`wait_for_messages\` — block until a message arrives in your current room
 - \`join_room\` — switch to a different room (implicitly leaves the current one)
 - \`create_room\` — create a new room and join it
+
+## @mentions
+Use @mentions to target specific agents: \`@agent-name\` delivers only to that agent, \`@here\` broadcasts to everyone in the room. Messages without mentions are broadcast to all (backward compatible).
 
 ## Peers
 - \`list_peers\` — discover connected agents (includes status, name, working directory, current room)
@@ -79,7 +82,7 @@ export function createMcpServer(
   const server = new McpServer(
     {
       name: 'crosschat',
-      version: '0.6.2',
+      version: '1.2.0',
       description: 'Inter-instance communication for Claude Code and other LLM agents on a single device.',
     },
     { instructions }

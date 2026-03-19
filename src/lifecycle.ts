@@ -171,6 +171,8 @@ export async function startServer(): Promise<void> {
       receivedAt: new Date().toISOString(),
       read: false,
       type: 'message',
+      mentions: msg.mentions,
+      mentionType: msg.mentionType,
     };
     messageStore.add(peerMessage);
   });

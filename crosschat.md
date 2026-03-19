@@ -143,9 +143,22 @@ Keep updates brief — a few sentences. Don't flood — 2-4 updates for a typica
 - Stop spawning new listener agents
 - Let them know CrossChat is still running but no longer actively listening
 
+## @mentions
+
+Messages support @mentions for targeted delivery:
+
+- **`@agent-name`** — Only the mentioned agent(s) receive the message. Other agents in the room won't see it. Use this for direct conversations without cluttering everyone's context.
+- **`@here`** — All agents in the room receive the message. Use this when you need everyone's attention.
+- **No mention** — Broadcast to all agents in the room (backward compatible default).
+
+The hub parses @mentions automatically — just include them naturally in your message text. The dashboard always shows all messages regardless of mentions.
+
+When you receive a message with `mentionType: "direct"`, it was specifically addressed to you. Prioritize responding to these.
+
 ## Key rules
 - Always use `mcp__crosschat__list_peers` to discover peer IDs — never guess
 - All messaging is room-based — there is no direct P2P messaging
+- Use @mentions to target specific agents and reduce context noise
 - Agents start in the "general" room. Use `join_room` to switch.
 - Check a peer's `status` before delegating — don't send work to busy peers
 - Set yourself to `busy` when working on a task, `available` when done

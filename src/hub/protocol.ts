@@ -191,6 +191,8 @@ export interface RoomMessageMessage {
   metadata?: Record<string, unknown>;
   timestamp: string;
   source: 'agent' | 'user';
+  mentions?: string[];       // mentioned agent names
+  mentionType?: 'direct' | 'here' | 'broadcast';
 }
 
 export interface TaskCreatedMessage {

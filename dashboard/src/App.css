@@ -472,6 +472,20 @@
   color: var(--text-bright);
 }
 
+/* Mention highlighting */
+.mention {
+  color: var(--accent);
+  font-weight: 600;
+  background: rgba(99, 102, 241, 0.1);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.mention-here {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.1);
+}
+
 .event-notice {
   text-align: center;
   color: var(--text-muted);

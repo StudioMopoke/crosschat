@@ -161,7 +161,7 @@ function ChatArea({ room, messages, username, onSendMessage, events, replyTarget
                 </button>
               )}
             </div>
-            <div className="message-text">{msg.text}</div>
+            <div className="message-text">{renderMessageText(msg.text)}</div>
           </div>
         ))}
         {events.map((evt, i) => (
@@ -189,6 +189,19 @@ function ChatArea({ room, messages, username, onSendMessage, events, replyTarget
       </form>
     </main>
   );
+}
+
+// ── Mention highlighting ────────────────────────────────────────────
+
+function renderMessageText(text) {
+  const parts = text.split(/(@[\w-]+)/g);
+  return parts.map((part, i) => {
+    if (/^@[\w-]+$/.test(part)) {
+      const cls = part.toLowerCase() === '@here' ? 'mention mention-here' : 'mention';
+      return <span key={i} className={cls}>{part}</span>;
+    }
+    return part;
+  });
 }
 
 // ── Status helpers ──────────────────────────────────────────────────
