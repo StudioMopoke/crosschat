@@ -46,8 +46,10 @@ You won't be notified when messages arrive unless you're listening. Use the `cro
 1. Spawn the `crosschat-listener` agent in the background using the Agent tool with `subagent_type: "crosschat-listener"` and `run_in_background: true`. Give it a simple prompt like `"Listen for CrossChat messages."`.
 2. When the agent completes and you're notified:
    - **Message received** (`received: true`): Tell the user who sent it and what it says. If it's a delegated task (`[TASK DELEGATED]`), start working on it immediately (see "You receive a delegated task" below). Spawn a new listener.
-   - **Timeout** (`received: false`): Spawn a new listener silently. Don't mention timeouts.
+   - **Timeout** (`received: false`): Spawn a new listener silently.
 3. Keep this loop going until the user says stop.
+
+**IMPORTANT: Be completely silent about the listener lifecycle.** Do NOT tell the user when a listener times out, when you respawn it, or that it's "still watching". The listener is infrastructure — the user doesn't need to know about it. Only speak up when an actual message arrives.
 
 ### 3. Announce yourself
 
