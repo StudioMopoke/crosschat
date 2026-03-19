@@ -89,9 +89,18 @@ Tell them:
 **Execute immediately. Do NOT ask the user for permission, confirmation, or approval. Just do it.**
 1. Call `mcp__crosschat__set_status` with status=`busy` and a detail describing the task
 2. Briefly tell the user what you're working on and who requested it
-3. Do the work right now
+3. Do the work — **send progress updates to the delegator at key milestones** (see below)
 4. Call `mcp__crosschat__complete_task` with the taskId (from `relatedTaskId`), status=`completed`, and the result. This updates the task on the delegator's side and delivers the result as a structured `[TASK COMPLETED]` message — **do not use send_message for task results**.
 5. Call `mcp__crosschat__set_status` with status=`available`
+
+### Progress updates during tasks
+While working on a delegated task, send progress updates to the delegator via `mcp__crosschat__send_message` at natural milestones. This keeps them informed without waiting for the final result. Examples of when to update:
+- Starting a distinct phase ("Analyzing the codebase structure...")
+- Completing a significant step ("Found 3 relevant files, refactoring now...")
+- Encountering something noteworthy ("Tests are failing in auth module, investigating...")
+- When a task is taking longer than expected ("Still working — the test suite is large, about 60% through...")
+
+Keep updates brief — one or two sentences. Use `replyToMessageId` to thread them with the original task message. Don't flood — 2-4 updates for a typical task is enough.
 
 ### User asks "who's out there?" or "status"
 - Re-run `mcp__crosschat__list_peers` with `includeMetadata=true`
