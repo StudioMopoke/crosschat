@@ -18,6 +18,7 @@ export function registerWaitForMessages(server: McpServer, messageStore: Message
       // Check for unread messages first — return immediately if any exist
       const existing = messageStore.getAll({ unreadOnly: true, limit: 1 });
       if (existing.length > 0) {
+        messageStore.markAsRead([existing[0].messageId]);
         return {
           content: [
             {
@@ -45,6 +46,7 @@ export function registerWaitForMessages(server: McpServer, messageStore: Message
         };
       }
 
+      messageStore.markAsRead([message.messageId]);
       return {
         content: [
           {
