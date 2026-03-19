@@ -25,6 +25,33 @@ function UsernamePrompt({ onSubmit }) {
   );
 }
 
+function PeerBadge({ icon, label, detail, variant }) {
+  return (
+    <span className={`peer-badge ${variant || ''}`}>
+      <span className="peer-badge-icon">{icon}</span>
+      <span className="peer-badge-label">{label}</span>
+      {detail && <span className="peer-badge-tooltip">{detail}</span>}
+    </span>
+  );
+}
+
+function shortDir(cwd) {
+  if (!cwd) return '?';
+  const parts = cwd.split('/').filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : '/';
+}
+
+function timeSince(isoDate) {
+  if (!isoDate) return 'unknown';
+  const seconds = Math.floor((Date.now() - new Date(isoDate).getTime()) / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
 function PeersBar({ peers, onMentionPeer }) {
   if (!peers.length) return null;
   return (
@@ -35,7 +62,6 @@ function PeersBar({ peers, onMentionPeer }) {
           <div
             key={peer.peerId}
             className={`peer-item ${peer.status}`}
-            title={`${peer.name}\n${peer.cwd || 'unknown directory'}\nStatus: ${peer.status}${peer.statusDetail ? ` — ${peer.statusDetail}` : ''}\nRoom: ${peer.currentRoom || 'general'}\nClick to mention`}
             onClick={() => onMentionPeer && onMentionPeer(peer.name)}
             style={{ cursor: 'pointer' }}
           >
@@ -45,7 +71,34 @@ function PeersBar({ peers, onMentionPeer }) {
             </div>
             <div className="peer-info">
               <span className="peer-name">{peer.name}</span>
-              <span className="peer-room">#{peer.currentRoom || 'general'}</span>
+              <div className="peer-badges">
+                <PeerBadge
+                  icon="&#128193;"
+                  label={shortDir(peer.cwd)}
+                  detail={peer.cwd || 'Unknown directory'}
+                  variant="dir"
+                />
+                <PeerBadge
+                  icon={peer.status === 'available' ? '&#9679;' : '&#9679;'}
+                  label={peer.status}
+                  detail={peer.statusDetail || `Status: ${peer.status}`}
+                  variant={peer.status}
+                />
+                <PeerBadge
+                  icon="&#128337;"
+                  label={timeSince(peer.connectedAt)}
+                  detail={`Connected since ${peer.connectedAt ? new Date(peer.connectedAt).toLocaleString() : 'unknown'}`}
+                  variant="session"
+                />
+                {peer.statusDetail && (
+                  <PeerBadge
+                    icon="&#128736;"
+                    label="Task"
+                    detail={peer.statusDetail}
+                    variant="task"
+                  />
+                )}
+              </div>
             </div>
           </div>
         ))}
@@ -101,7 +154,7 @@ function Sidebar({ rooms, activeRoomId, onSelectRoom, onCreateRoom, peers, onMen
   );
 }
 
-function ChatArea({ room, messages, username, onSendMessage, events, replyTarget, onClearReply }) {
+function ChatArea({ room, messages, username, onSendMessage, events, replyTarget, onClearReply, peers }) {
   const [text, setText] = useState('');
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -148,6 +201,7 @@ function ChatArea({ room, messages, username, onSendMessage, events, replyTarget
           >
             <div className="message-header">
               <span className="message-author">{msg.username}</span>
+              <MessageBadges username={msg.username} peers={peers} />
               <span className="message-time">
                 {new Date(msg.timestamp).toLocaleTimeString()}
               </span>
@@ -188,6 +242,39 @@ function ChatArea({ room, messages, username, onSendMessage, events, replyTarget
         <button type="submit" disabled={!text.trim()}>Send</button>
       </form>
     </main>
+  );
+}
+
+// ── Message Badges ──────────────────────────────────────────────────
+
+function MessageBadges({ username, peers }) {
+  if (!peers || !peers.length) return null;
+  const peer = peers.find((p) => p.name === username);
+  if (!peer) return null;
+
+  return (
+    <span className="message-badges">
+      <PeerBadge
+        icon="&#128193;"
+        label={shortDir(peer.cwd)}
+        detail={peer.cwd || 'Unknown directory'}
+        variant="dir"
+      />
+      <PeerBadge
+        icon={'\u25CF'}
+        label={peer.status}
+        detail={peer.statusDetail || `Status: ${peer.status}`}
+        variant={peer.status}
+      />
+      {peer.statusDetail && (
+        <PeerBadge
+          icon="&#128736;"
+          label="Task"
+          detail={peer.statusDetail}
+          variant="task"
+        />
+      )}
+    </span>
   );
 }
 
@@ -590,6 +677,7 @@ export default function App() {
             events={events}
             replyTarget={replyTarget}
             onClearReply={() => setReplyTarget(null)}
+            peers={peers}
           />
         ) : (
           <TasksPanel />

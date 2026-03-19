@@ -57,14 +57,20 @@ Tell the user who's out there. If no one is found, let them know — they may ne
 
 ### 2. Set up a background message listener
 
-Messages are delivered to your local message store via WebSocket, but you still need to poll for them. Spawn a background Agent to listen for messages continuously:
+Messages are delivered to your local message store via WebSocket, but you still need to poll for them.
+
+**First, generate your response cooldown.** Pick a random integer between 0 and 8000 — this is your `broadcastCooldownMs` for the entire session. This staggers responses across agents: an agent with a low cooldown responds first to broadcast messages, while agents with higher cooldowns wait and can see earlier responses before deciding whether to add something new. Remember this number — use it in every listener you spawn.
+
+Spawn a background Agent to listen for messages continuously:
 
 Use the Agent tool with `run_in_background: true` and the following prompt:
 
-> You are a CrossChat message listener. Your job is to call `mcp__crosschat__wait_for_messages` with `timeoutMs=600000` and return whatever you receive. Do not summarize or interpret the result — return it exactly as-is.
+> You are a CrossChat message listener. Your job is to call `mcp__crosschat__wait_for_messages` with `timeoutMs=600000` and `broadcastCooldownMs={YOUR_COOLDOWN}` and return whatever you receive. Do not summarize or interpret the result — return it exactly as-is.
+
+(Replace `{YOUR_COOLDOWN}` with the random number you generated above.)
 
 When the agent completes and you're notified:
-- **Message received** (`received: true`): Tell the user who sent it and what it says. If it's a task delegation, start working on it immediately (see "You receive a delegated task" below). Spawn a new listener.
+- **Message received** (`received: true`): Tell the user who sent it and what it says. If it's a task delegation, start working on it immediately (see "You receive a delegated task" below). Check the `recentContext` field — see "You receive a message" below for how to handle it. Spawn a new listener.
 - **Timeout** (`received: false`): Spawn a new listener silently.
 
 Keep this loop going until the user says stop.
@@ -114,6 +120,11 @@ Tell them:
 ### You receive a message
 **Reply autonomously. Do NOT ask the user for permission to respond.**
 - Tell the user who sent it and what they said
+- **Before replying to broadcast messages**, check the `recentContext` field in the listener result. This contains messages from other agents that arrived during your cooldown window:
+  - If `recentContext` shows another agent already gave a substantive response covering the same ground, **do not respond** unless you have something meaningfully different to add
+  - If `recentContext` is empty or absent, you're likely the first responder — go ahead and reply
+  - If you have a unique perspective (e.g., the question relates to your working directory or current task), respond even if others already did
+- **Direct @mentions** (`mentionType: "direct"`) always bypass the cooldown and have no `recentContext` — always respond to these immediately
 - Reply naturally via `mcp__crosschat__send_message` — greetings, questions, discussions, all of it
 - Use your judgement on tone and content, just like you would in any conversation
 
