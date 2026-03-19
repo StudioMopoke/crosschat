@@ -13,6 +13,7 @@ import { TaskStore } from './stores/task-store.js';
 import { createMcpServer } from './server.js';
 import { DashboardServer } from './dashboard/http-server.js';
 import { MessageBridge } from './dashboard/message-bridge.js';
+import { DashboardListener } from './dashboard/dashboard-listener.js';
 import { isProcessAlive } from './util/pid.js';
 import type { PeerRegistryEntry, PeerStatus, PeerMessage, InboundTask, PeerMessageParams, PeerDelegateTaskParams, PeerTaskUpdateParams } from './types.js';
 
@@ -197,15 +198,18 @@ export async function startServer(): Promise<void> {
   // 7. Start dashboard if no other instance is running it
   let dashboard: DashboardServer | null = null;
   let bridge: MessageBridge | null = null;
+  let dashboardListener: DashboardListener | null = null;
+  let dashboardPort: number | null = null;
   const existingLock = await readDashboardLock();
   if (!existingLock) {
     try {
-      const dashboardPort = process.env.CROSSCHAT_DASHBOARD_PORT ? parseInt(process.env.CROSSCHAT_DASHBOARD_PORT, 10) : 0;
-      dashboard = new DashboardServer(dashboardPort);
+      const configPort = process.env.CROSSCHAT_DASHBOARD_PORT ? parseInt(process.env.CROSSCHAT_DASHBOARD_PORT, 10) : 0;
+      dashboard = new DashboardServer(configPort);
       const actualPort = await dashboard.start();
       await writeDashboardLock(actualPort);
+      dashboardPort = actualPort;
 
-      bridge = new MessageBridge(messageStore, dashboard, peerName, peerId);
+      bridge = new MessageBridge(messageStore, dashboard);
       bridge.start();
 
       // Post a startup message to the dashboard
@@ -215,7 +219,14 @@ export async function startServer(): Promise<void> {
       dashboard = null;
     }
   } else {
+    dashboardPort = existingLock.port;
     log(`Dashboard already running on port ${existingLock.port} (pid ${existingLock.pid})`);
+  }
+
+  // 7b. Connect to dashboard as a listener (every instance, including the host)
+  if (dashboardPort) {
+    dashboardListener = new DashboardListener(dashboardPort, messageStore, peerName, peerId);
+    dashboardListener.start();
   }
 
   // 8. Create and connect MCP server
@@ -248,6 +259,7 @@ export async function startServer(): Promise<void> {
     clearInterval(pruneInterval);
     clearInterval(taskSweepInterval);
 
+    if (dashboardListener) dashboardListener.stop();
     if (bridge) bridge.stop();
     if (dashboard) {
       await dashboard.close();

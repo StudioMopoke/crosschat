@@ -15,6 +15,7 @@ interface ChatMessage {
   username: string;
   text: string;
   timestamp: string;
+  source: 'user' | 'agent';
 }
 
 interface ChatRoom {
@@ -117,6 +118,7 @@ export class DashboardServer {
         username: username.trim(),
         text: text.trim(),
         timestamp: new Date().toISOString(),
+        source: 'user',
       };
       room.messages.push(message);
       this.broadcast({ type: 'message', ...message }, room.id);
@@ -188,6 +190,7 @@ export class DashboardServer {
       username,
       text,
       timestamp: new Date().toISOString(),
+      source: 'agent',
     };
     room.messages.push(message);
     this.broadcast({ type: 'message', ...message }, room.id);
@@ -214,10 +217,12 @@ export class DashboardServer {
             const room = this.rooms.get(data.roomId as string);
             if (!room) { ws.send(JSON.stringify({ type: 'error', error: 'Room not found' })); return; }
             this.clientRooms.get(ws)!.add(data.roomId as string);
-            this.broadcast(
-              { type: 'userJoined', roomId: data.roomId, username: data.username || 'Anonymous' },
-              data.roomId as string
-            );
+            if (!data.silent) {
+              this.broadcast(
+                { type: 'userJoined', roomId: data.roomId, username: data.username || 'Anonymous' },
+                data.roomId as string
+              );
+            }
             break;
           }
           case 'message': {
@@ -229,9 +234,11 @@ export class DashboardServer {
               username: (data.username as string).trim(),
               text: (data.text as string).trim(),
               timestamp: new Date().toISOString(),
+              source: 'user',
             };
             room.messages.push(message);
             this.broadcast({ type: 'message', ...message }, room.id);
+            this.notifyUserMessage(message.username, message.text, room.id);
             break;
           }
           case 'leave': {
