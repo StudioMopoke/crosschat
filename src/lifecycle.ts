@@ -200,7 +200,7 @@ export async function startServer(): Promise<void> {
   const existingLock = await readDashboardLock();
   if (!existingLock) {
     try {
-      const dashboardPort = parseInt(process.env.CROSSCHAT_DASHBOARD_PORT || '3002', 10);
+      const dashboardPort = process.env.CROSSCHAT_DASHBOARD_PORT ? parseInt(process.env.CROSSCHAT_DASHBOARD_PORT, 10) : 0;
       dashboard = new DashboardServer(dashboardPort);
       const actualPort = await dashboard.start();
       await writeDashboardLock(actualPort);

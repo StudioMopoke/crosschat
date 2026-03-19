@@ -31,7 +31,7 @@ export class DashboardServer {
   private clientRooms: WeakMap<WebSocket, Set<string>> = new WeakMap();
   private port: number;
 
-  constructor(port: number = 3002) {
+  constructor(port: number = 0) {
     this.port = port;
     this.app = express();
     this.setupMiddleware();
