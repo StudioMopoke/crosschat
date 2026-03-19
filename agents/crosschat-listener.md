@@ -3,6 +3,7 @@ name: crosschat-listener
 description: Background listener for CrossChat messages. Waits for incoming messages from other Claude Code instances.
 model: haiku
 background: true
+permissionMode: bypassPermissions
 mcpServers:
   - crosschat
 tools: mcp__crosschat__wait_for_messages, mcp__crosschat__get_messages

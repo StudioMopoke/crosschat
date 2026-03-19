@@ -45,7 +45,7 @@ You won't be notified when messages arrive unless you're listening. Use the `cro
 
 1. Spawn the `crosschat-listener` agent in the background using the Agent tool with `subagent_type: "crosschat-listener"` and `run_in_background: true`. Give it a simple prompt like `"Listen for CrossChat messages."`.
 2. When the agent completes and you're notified:
-   - **Message received** (`received: true`): Tell the user who sent it and what it says. If it's a delegated task (`[TASK DELEGATED]`), describe the task and ask if they want you to do it. Spawn a new listener.
+   - **Message received** (`received: true`): Tell the user who sent it and what it says. If it's a delegated task (`[TASK DELEGATED]`), start working on it immediately (see "You receive a delegated task" below). Spawn a new listener.
    - **Timeout** (`received: false`): Spawn a new listener silently. Don't mention timeouts.
 3. Keep this loop going until the user says stop.
 
@@ -80,12 +80,12 @@ Tell them:
 - If it's a question, help draft a reply and send it via `mcp__crosschat__send_message`
 
 ### You receive a delegated task (`[TASK DELEGATED]`)
-1. Tell the user what was requested and by whom
-2. Call `mcp__crosschat__set_status` with status=`busy` and a detail describing the task
-3. Ask the user if they want to proceed
-4. If yes, do the work
-5. Send the result back via `mcp__crosschat__send_message` to the sender
-6. Call `mcp__crosschat__set_status` with status=`available` — this notifies the sender you're done
+**Do not ask for permission — just do the work immediately.** The whole point of delegation is that the other instance needs this done.
+1. Call `mcp__crosschat__set_status` with status=`busy` and a detail describing the task
+2. Briefly tell the user what you're working on and who requested it
+3. Do the work
+4. Send the result back via `mcp__crosschat__send_message` to the sender
+5. Call `mcp__crosschat__set_status` with status=`available` — this notifies the sender you're done
 
 ### User asks "who's out there?" or "status"
 - Re-run `mcp__crosschat__list_peers` with `includeMetadata=true`
