@@ -1,18 +1,66 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
 import { generateId } from './util/id.js';
 import { log, logError } from './util/logger.js';
-import { ensureDirectories, writeRegistryEntry, removeRegistryEntry, removeSocketFile, getSocketPath, readRegistryEntry } from './registry/registry.js';
+import { ensureDirectories, writeRegistryEntry, removeRegistryEntry, removeSocketFile, getSocketPath } from './registry/registry.js';
 import { pruneStaleEntries } from './registry/cleanup.js';
 import { UdsServer, type RequestHandler } from './transport/uds-server.js';
-import { sendPeerRequest } from './transport/uds-client.js';
 import { MessageStore } from './stores/message-store.js';
 import { TaskStore } from './stores/task-store.js';
 import { createMcpServer } from './server.js';
+import { DashboardServer } from './dashboard/http-server.js';
+import { MessageBridge } from './dashboard/message-bridge.js';
+import { isProcessAlive } from './util/pid.js';
 import type { PeerRegistryEntry, PeerStatus, PeerMessage, InboundTask, PeerMessageParams, PeerDelegateTaskParams, PeerTaskUpdateParams } from './types.js';
 
 const PRUNE_INTERVAL_MS = 30_000;
 const TASK_SWEEP_INTERVAL_MS = 10_000;
+const DASHBOARD_LOCK_FILE = path.join(os.homedir(), '.crosschat', 'dashboard.lock');
+
+interface DashboardLock {
+  pid: number;
+  port: number;
+  startedAt: string;
+}
+
+async function readDashboardLock(): Promise<DashboardLock | null> {
+  try {
+    const data = await fs.readFile(DASHBOARD_LOCK_FILE, 'utf-8');
+    const lock = JSON.parse(data) as DashboardLock;
+    // Check if the process is still alive
+    if (isProcessAlive(lock.pid)) {
+      return lock;
+    }
+    // Stale lock — remove it
+    await fs.unlink(DASHBOARD_LOCK_FILE).catch(() => {});
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeDashboardLock(port: number): Promise<void> {
+  const lock: DashboardLock = {
+    pid: process.pid,
+    port,
+    startedAt: new Date().toISOString(),
+  };
+  const tmpPath = `${DASHBOARD_LOCK_FILE}.tmp`;
+  await fs.writeFile(tmpPath, JSON.stringify(lock, null, 2), 'utf-8');
+  await fs.rename(tmpPath, DASHBOARD_LOCK_FILE);
+}
+
+async function removeDashboardLock(): Promise<void> {
+  try {
+    const lock = await readDashboardLock();
+    if (lock && lock.pid === process.pid) {
+      await fs.unlink(DASHBOARD_LOCK_FILE);
+    }
+  } catch {}
+}
 
 export async function startServer(): Promise<void> {
   const peerId = generateId();
@@ -33,14 +81,6 @@ export async function startServer(): Promise<void> {
   const taskStore = new TaskStore();
 
   // 4. Build peer request handler
-  const updateStatus = async (status: PeerStatus, detail?: string, busyTaskId?: string, orchestratorId?: string) => {
-    entry.status = status;
-    entry.statusDetail = detail;
-    entry.busyWithTaskId = busyTaskId;
-    entry.orchestratorPeerId = orchestratorId;
-    await writeRegistryEntry(entry);
-  };
-
   const handlePeerRequest: RequestHandler = async (method, params) => {
     switch (method) {
       case 'peer.ping':
@@ -154,12 +194,36 @@ export async function startServer(): Promise<void> {
   };
   await writeRegistryEntry(entry);
 
-  // 7. Create and connect MCP server
-  const mcpServer = createMcpServer(peerId, peerName, messageStore, taskStore, entry);
+  // 7. Start dashboard if no other instance is running it
+  let dashboard: DashboardServer | null = null;
+  let bridge: MessageBridge | null = null;
+  const existingLock = await readDashboardLock();
+  if (!existingLock) {
+    try {
+      const dashboardPort = parseInt(process.env.CROSSCHAT_DASHBOARD_PORT || '3002', 10);
+      dashboard = new DashboardServer(dashboardPort);
+      const actualPort = await dashboard.start();
+      await writeDashboardLock(actualPort);
+
+      bridge = new MessageBridge(messageStore, dashboard, peerName);
+      bridge.start();
+
+      // Post a startup message to the dashboard
+      dashboard.postToRoom('crosschat', 'system', `${peerName} started the dashboard on port ${actualPort}`);
+    } catch (err) {
+      logError('Failed to start dashboard', err);
+      dashboard = null;
+    }
+  } else {
+    log(`Dashboard already running on port ${existingLock.port} (pid ${existingLock.pid})`);
+  }
+
+  // 8. Create and connect MCP server
+  const mcpServer = createMcpServer(peerId, peerName, messageStore, taskStore, entry, dashboard);
   const transport = new StdioServerTransport();
   await mcpServer.connect(transport);
 
-  // 8. Start periodic intervals
+  // 9. Start periodic intervals
   const pruneInterval = setInterval(async () => {
     try {
       await pruneStaleEntries(peerId);
@@ -174,7 +238,7 @@ export async function startServer(): Promise<void> {
   }, TASK_SWEEP_INTERVAL_MS);
   taskSweepInterval.unref();
 
-  // 9. Shutdown handler
+  // 10. Shutdown handler
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
@@ -183,6 +247,12 @@ export async function startServer(): Promise<void> {
 
     clearInterval(pruneInterval);
     clearInterval(taskSweepInterval);
+
+    if (bridge) bridge.stop();
+    if (dashboard) {
+      await dashboard.close();
+      await removeDashboardLock();
+    }
 
     await udsServer.close();
     await removeRegistryEntry(peerId);

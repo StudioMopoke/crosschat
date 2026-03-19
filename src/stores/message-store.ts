@@ -1,10 +1,12 @@
 import type { PeerMessage } from '../types.js';
 
 type MessageWaiter = (message: PeerMessage) => void;
+type MessageListener = (message: PeerMessage) => void;
 
 export class MessageStore {
   private messages: PeerMessage[] = [];
   private waiters: MessageWaiter[] = [];
+  private listeners: MessageListener[] = [];
 
   add(message: PeerMessage): void {
     this.messages.push(message);
@@ -13,6 +15,18 @@ export class MessageStore {
     for (const resolve of toNotify) {
       resolve(message);
     }
+    // Notify persistent listeners (for dashboard bridge)
+    for (const listener of this.listeners) {
+      listener(message);
+    }
+  }
+
+  onMessage(listener: MessageListener): () => void {
+    this.listeners.push(listener);
+    return () => {
+      const idx = this.listeners.indexOf(listener);
+      if (idx !== -1) this.listeners.splice(idx, 1);
+    };
   }
 
   waitForNext(timeoutMs: number): Promise<PeerMessage | null> {

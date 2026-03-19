@@ -7,6 +7,7 @@ const os = require("os");
 const pkg = require("../package.json");
 
 const CLAUDE_JSON = path.join(os.homedir(), ".claude.json");
+const SETTINGS_JSON = path.join(os.homedir(), ".claude", "settings.json");
 const COMMANDS_DIR = path.join(os.homedir(), ".claude", "commands");
 const AGENTS_DIR = path.join(os.homedir(), ".claude", "agents");
 const COMMAND_SOURCE = path.join(__dirname, "..", "crosschat.md");
@@ -14,6 +15,18 @@ const COMMAND_TARGET = path.join(COMMANDS_DIR, "crosschat.md");
 const AGENT_SOURCE = path.join(__dirname, "..", "agents", "crosschat-listener.md");
 const AGENT_TARGET = path.join(AGENTS_DIR, "crosschat-listener.md");
 const MCP_KEY = "crosschat";
+
+const CROSSCHAT_PERMISSIONS = [
+  "mcp__crosschat__wait_for_messages",
+  "mcp__crosschat__get_messages",
+  "mcp__crosschat__list_peers",
+  "mcp__crosschat__send_message",
+  "mcp__crosschat__set_status",
+  "mcp__crosschat__complete_task",
+  "mcp__crosschat__delegate_task",
+  "mcp__crosschat__get_task_status",
+  "mcp__crosschat__chat_send_message",
+];
 
 const command = process.argv[2];
 
@@ -92,11 +105,27 @@ function install() {
 
   writeSettings(CLAUDE_JSON, claudeJson);
 
-  // 2. Install /crosschat command
+  // 2. Add CrossChat tool permissions to ~/.claude/settings.json
+  const settings = readSettings(SETTINGS_JSON);
+  if (!settings.permissions) settings.permissions = {};
+  if (!settings.permissions.allow) settings.permissions.allow = [];
+  const existingPerms = new Set(settings.permissions.allow);
+  let addedPerms = 0;
+  for (const perm of CROSSCHAT_PERMISSIONS) {
+    if (!existingPerms.has(perm)) {
+      settings.permissions.allow.push(perm);
+      addedPerms++;
+    }
+  }
+  if (addedPerms > 0) {
+    writeSettings(SETTINGS_JSON, settings);
+  }
+
+  // 3. Install /crosschat command
   ensureDir(COMMANDS_DIR);
   fs.copyFileSync(COMMAND_SOURCE, COMMAND_TARGET);
 
-  // 3. Install crosschat-listener agent
+  // 4. Install crosschat-listener agent
   ensureDir(AGENTS_DIR);
   fs.copyFileSync(AGENT_SOURCE, AGENT_TARGET);
 

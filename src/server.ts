@@ -10,7 +10,9 @@ import { registerGetTaskStatus } from './tools/get-task-status.js';
 import { registerWaitForMessages } from './tools/wait-for-messages.js';
 import { registerSetStatus } from './tools/set-status.js';
 import { registerCompleteTask } from './tools/complete-task.js';
+import { registerChatSend } from './tools/chat-send.js';
 import { registerPrompts } from './prompts.js';
+import type { DashboardServer } from './dashboard/http-server.js';
 
 const SERVER_INSTRUCTIONS = `\
 CrossChat lets you talk to other Claude Code instances on this machine. You can discover them, send messages, and delegate tasks.
@@ -26,6 +28,7 @@ Your identity: **{peerName}** (peer ID: {peerId}). You are automatically registe
 - \`wait_for_messages\` — long-poll for incoming messages (for background listeners)
 - \`set_status\` — set yourself as available or busy
 - \`complete_task\` — report task results back to the delegator (use instead of send_message for task results)
+- \`chat_send_message\` — post a message to the dashboard UI (if dashboard is running)
 
 ## Key rules
 - Use \`list_peers\` to discover peer IDs — never guess UUIDs.
@@ -41,7 +44,8 @@ export function createMcpServer(
   peerName: string,
   messageStore: MessageStore,
   taskStore: TaskStore,
-  registryEntry: PeerRegistryEntry
+  registryEntry: PeerRegistryEntry,
+  dashboard: DashboardServer | null
 ): McpServer {
   const instructions = SERVER_INSTRUCTIONS
     .replace('{peerName}', peerName)
@@ -64,6 +68,9 @@ export function createMcpServer(
   registerWaitForMessages(server, messageStore);
   registerSetStatus(server, registryEntry);
   registerCompleteTask(server, taskStore);
+  if (dashboard) {
+    registerChatSend(server, dashboard, peerName);
+  }
   registerPrompts(server, peerId, peerName);
 
   return server;
