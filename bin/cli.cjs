@@ -9,11 +9,8 @@ const pkg = require("../package.json");
 const CLAUDE_JSON = path.join(os.homedir(), ".claude.json");
 const SETTINGS_JSON = path.join(os.homedir(), ".claude", "settings.json");
 const COMMANDS_DIR = path.join(os.homedir(), ".claude", "commands");
-const AGENTS_DIR = path.join(os.homedir(), ".claude", "agents");
 const COMMAND_SOURCE = path.join(__dirname, "..", "crosschat.md");
 const COMMAND_TARGET = path.join(COMMANDS_DIR, "crosschat.md");
-const AGENT_SOURCE = path.join(__dirname, "..", "agents", "crosschat-listener.md");
-const AGENT_TARGET = path.join(AGENTS_DIR, "crosschat-listener.md");
 const MCP_KEY = "crosschat";
 
 const CROSSCHAT_PERMISSIONS = [
@@ -25,7 +22,12 @@ const CROSSCHAT_PERMISSIONS = [
   "mcp__crosschat__complete_task",
   "mcp__crosschat__delegate_task",
   "mcp__crosschat__get_task_status",
-  "mcp__crosschat__chat_send_message",
+  "mcp__crosschat__join_room",
+  "mcp__crosschat__create_room",
+  "mcp__crosschat__claim_task",
+  "mcp__crosschat__accept_claim",
+  "mcp__crosschat__update_task",
+  "mcp__crosschat__list_tasks",
 ];
 
 const command = process.argv[2];
@@ -125,10 +127,6 @@ function install() {
   ensureDir(COMMANDS_DIR);
   fs.copyFileSync(COMMAND_SOURCE, COMMAND_TARGET);
 
-  // 4. Install crosschat-listener agent
-  ensureDir(AGENTS_DIR);
-  fs.copyFileSync(AGENT_SOURCE, AGENT_TARGET);
-
   if (isUpdate) {
     console.log("Updated CrossChat in " + CLAUDE_JSON);
   } else {
@@ -136,7 +134,6 @@ function install() {
   }
 
   console.log("Installed /crosschat command to " + COMMAND_TARGET);
-  console.log("Installed crosschat-listener agent to " + AGENT_TARGET);
   console.log("");
   if (serverEntry) {
     console.log("  MCP server: " + serverEntry);
@@ -169,13 +166,6 @@ function uninstall() {
     removedAnything = true;
   }
 
-  // 3. Remove crosschat-listener agent
-  if (fs.existsSync(AGENT_TARGET)) {
-    fs.unlinkSync(AGENT_TARGET);
-    console.log("Removed crosschat-listener agent");
-    removedAnything = true;
-  }
-
   if (!removedAnything) {
     console.log("CrossChat is not installed — nothing to remove.");
   }
@@ -197,62 +187,88 @@ function serve() {
   });
 }
 
-function status() {
+async function status() {
   const claudeJson = readSettings(CLAUDE_JSON);
   const mcpConfigured = !!(
     claudeJson.mcpServers && claudeJson.mcpServers[MCP_KEY]
   );
   const commandInstalled = fs.existsSync(COMMAND_TARGET);
-  const agentInstalled = fs.existsSync(AGENT_TARGET);
 
   console.log("CrossChat v" + pkg.version);
   console.log("");
   console.log("MCP server:     " + (mcpConfigured ? "installed" : "not installed"));
   console.log("/crosschat cmd: " + (commandInstalled ? "installed" : "not installed"));
-  console.log("listener agent: " + (agentInstalled ? "installed" : "not installed"));
 
-  // Check for active peers
-  const peersDir = path.join(os.homedir(), ".crosschat", "peers");
-  if (fs.existsSync(peersDir)) {
-    const files = fs
-      .readdirSync(peersDir)
-      .filter((f) => f.endsWith(".json"));
-    if (files.length > 0) {
+  // Read dashboard.lock to find the hub port
+  const lockFile = path.join(os.homedir(), ".crosschat", "dashboard.lock");
+  let hubPort = null;
+  if (fs.existsSync(lockFile)) {
+    try {
+      const lock = JSON.parse(fs.readFileSync(lockFile, "utf8"));
+      hubPort = lock.port;
+    } catch {
+      // malformed lock file
+    }
+  }
+
+  if (!hubPort) {
+    console.log("Hub:            not running");
+    return;
+  }
+
+  console.log("Hub:            running on port " + hubPort);
+  console.log("Dashboard:      http://localhost:" + hubPort);
+
+  // Query the hub for active peers
+  try {
+    const http = require("http");
+    const data = await new Promise((resolve, reject) => {
+      const req = http.get(
+        "http://localhost:" + hubPort + "/api/peers",
+        (res) => {
+          let body = "";
+          res.on("data", (chunk) => (body += chunk));
+          res.on("end", () => {
+            try {
+              resolve(JSON.parse(body));
+            } catch {
+              reject(new Error("Invalid JSON response"));
+            }
+          });
+        }
+      );
+      req.on("error", reject);
+      req.setTimeout(3000, () => {
+        req.destroy();
+        reject(new Error("Timeout"));
+      });
+    });
+
+    const peers = Array.isArray(data) ? data : [];
+    if (peers.length > 0) {
       console.log("");
       console.log("Active peers:");
-      for (const file of files) {
-        try {
-          const entry = JSON.parse(
-            fs.readFileSync(path.join(peersDir, file), "utf8")
-          );
-          const peerStatus = entry.status || "available";
-          const detail = entry.statusDetail
-            ? " (" + entry.statusDetail + ")"
-            : "";
-          const cwd =
-            entry.metadata && entry.metadata.cwd
-              ? " — " + entry.metadata.cwd
-              : "";
-          console.log(
-            "  " + entry.name + " [" + peerStatus + detail + "]" + cwd
-          );
-        } catch {
-          // skip malformed
-        }
+      for (const peer of peers) {
+        const peerStatus = peer.status || "available";
+        const detail = peer.statusDetail
+          ? " (" + peer.statusDetail + ")"
+          : "";
+        const room = peer.currentRoom
+          ? " [room: " + peer.currentRoom + "]"
+          : "";
+        const cwd = peer.cwd ? " — " + peer.cwd : "";
+        console.log(
+          "  " + peer.name + " [" + peerStatus + detail + "]" + room + cwd
+        );
       }
     } else {
       console.log("");
       console.log("No active peers.");
     }
+  } catch {
+    console.log("");
+    console.log("Hub not responding (port " + hubPort + ").");
   }
-}
-
-function getTargetSettingsPath() {
-  const localFlag = process.argv.indexOf("--project");
-  if (localFlag !== -1) {
-    return path.join(process.cwd(), ".claude", "settings.json");
-  }
-  return SETTINGS_GLOBAL;
 }
 
 function showHelp() {

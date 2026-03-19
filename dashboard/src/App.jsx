@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { fetchRooms, createRoom, fetchMessages, postMessage, fetchPeers } from './api';
+import { fetchRooms, createRoom, fetchMessages, postMessage, fetchPeers, fetchTasks, fetchTask, archiveTask } from './api';
 import { useWebSocket } from './useWebSocket';
 import './App.css';
 
@@ -34,11 +34,17 @@ function PeersBar({ peers }) {
         {peers.map((peer) => (
           <div
             key={peer.peerId}
-            className={`peer-icon ${peer.status}`}
-            title={`${peer.name}\n${peer.cwd || 'unknown directory'}\nStatus: ${peer.status}${peer.statusDetail ? ` — ${peer.statusDetail}` : ''}`}
+            className={`peer-item ${peer.status}`}
+            title={`${peer.name}\n${peer.cwd || 'unknown directory'}\nStatus: ${peer.status}${peer.statusDetail ? ` — ${peer.statusDetail}` : ''}\nRoom: ${peer.currentRoom || 'general'}`}
           >
-            <span className="peer-icon-letter">{peer.name.charAt(0).toUpperCase()}</span>
-            <span className={`peer-status-dot ${peer.status}`} />
+            <div className={`peer-icon ${peer.status}`}>
+              <span className="peer-icon-letter">{peer.name.charAt(0).toUpperCase()}</span>
+              <span className={`peer-status-dot ${peer.status}`} />
+            </div>
+            <div className="peer-info">
+              <span className="peer-name">{peer.name}</span>
+              <span className="peer-room">#{peer.currentRoom || 'general'}</span>
+            </div>
           </div>
         ))}
       </div>
@@ -118,9 +124,6 @@ function ChatArea({ room, messages, username, onSendMessage, events }) {
 
   return (
     <main className="chat-area">
-      <div className="chat-header">
-        <h2># {room.name}</h2>
-      </div>
       <div className="messages">
         {messages.map((msg) => (
           <div
@@ -156,6 +159,250 @@ function ChatArea({ room, messages, username, onSendMessage, events }) {
   );
 }
 
+// ── Status helpers ──────────────────────────────────────────────────
+
+const STATUS_LABELS = {
+  open: 'Open',
+  claimed: 'Claimed',
+  in_progress: 'In Progress',
+  completed: 'Completed',
+  failed: 'Failed',
+  archived: 'Archived',
+};
+
+const STATUS_ORDER = ['open', 'claimed', 'in_progress', 'completed', 'failed'];
+
+function StatusBadge({ status }) {
+  return (
+    <span className={`status-badge ${status}`}>
+      {STATUS_LABELS[status] || status}
+    </span>
+  );
+}
+
+function FilterBadges({ filter }) {
+  if (!filter) return null;
+  const badges = [];
+  if (filter.agentId) badges.push({ label: 'Agent', value: filter.agentId });
+  if (filter.workingDirReq) badges.push({ label: 'Dir', value: filter.workingDirReq });
+  if (filter.gitProject) badges.push({ label: 'Git', value: filter.gitProject });
+  if (badges.length === 0) return null;
+  return (
+    <div className="filter-badges">
+      {badges.map((b, i) => (
+        <span key={i} className="filter-badge" title={`${b.label}: ${b.value}`}>
+          {b.label}: {b.value}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function formatTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+// ── Task Card ───────────────────────────────────────────────────────
+
+function TaskCard({ task, onExpand, expanded, onArchive }) {
+  const [detail, setDetail] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [archiving, setArchiving] = useState(false);
+
+  useEffect(() => {
+    if (expanded && !detail) {
+      setLoading(true);
+      fetchTask(task.taskId)
+        .then(setDetail)
+        .catch(() => {})
+        .finally(() => setLoading(false));
+    }
+  }, [expanded, task.taskId]);
+
+  // Re-fetch detail when task updates come in
+  useEffect(() => {
+    if (expanded && detail) {
+      fetchTask(task.taskId)
+        .then(setDetail)
+        .catch(() => {});
+    }
+  }, [task.updatedAt]);
+
+  const handleArchive = async () => {
+    setArchiving(true);
+    try {
+      await onArchive(task.taskId);
+    } finally {
+      setArchiving(false);
+    }
+  };
+
+  const canArchive = task.status === 'completed' || task.status === 'failed';
+
+  return (
+    <div className={`task-card ${expanded ? 'expanded' : ''}`}>
+      <div className="task-card-header" onClick={() => onExpand(expanded ? null : task.taskId)}>
+        <div className="task-card-top">
+          <StatusBadge status={task.status} />
+          <span className="task-card-time">{formatTime(task.createdAt)}</span>
+        </div>
+        <div className="task-card-description">{task.description}</div>
+        <div className="task-card-meta">
+          <span className="task-meta-item">by {task.creatorName}</span>
+          {task.claimantName && (
+            <span className="task-meta-item">assigned: {task.claimantName}</span>
+          )}
+          <span className="task-meta-item">#{task.roomId}</span>
+        </div>
+        <FilterBadges filter={task.filter} />
+      </div>
+
+      {expanded && (
+        <div className="task-card-detail">
+          {loading && <div className="task-loading">Loading...</div>}
+          {detail && (
+            <>
+              {detail.context && (
+                <div className="task-context">
+                  <div className="task-section-label">Context</div>
+                  <div className="task-context-text">{detail.context}</div>
+                </div>
+              )}
+
+              {detail.result && (
+                <div className="task-result">
+                  <div className="task-section-label">Result</div>
+                  <div className="task-result-text">{detail.result}</div>
+                </div>
+              )}
+
+              {detail.notes && detail.notes.length > 0 && (
+                <div className="task-notes">
+                  <div className="task-section-label">Notes ({detail.notes.length})</div>
+                  {[...detail.notes].reverse().map((note) => (
+                    <div key={note.noteId} className="task-note">
+                      <div className="task-note-header">
+                        <span className="task-note-author">{note.authorName}</span>
+                        <span className="task-note-time">{formatTime(note.timestamp)}</span>
+                      </div>
+                      <div className="task-note-content">{note.content}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {canArchive && (
+                <button
+                  className="archive-btn"
+                  onClick={handleArchive}
+                  disabled={archiving}
+                >
+                  {archiving ? 'Archiving...' : 'Archive Task'}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Tasks Panel ─────────────────────────────────────────────────────
+
+function TasksPanel() {
+  const [tasks, setTasks] = useState([]);
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [expandedTaskId, setExpandedTaskId] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const loadTasks = useCallback(() => {
+    fetchTasks()
+      .then((data) => {
+        setTasks(data);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
+  // Initial load + auto-refresh every 5 seconds
+  useEffect(() => {
+    loadTasks();
+    const interval = setInterval(loadTasks, 5000);
+    return () => clearInterval(interval);
+  }, [loadTasks]);
+
+  const handleArchive = async (taskId) => {
+    try {
+      await archiveTask(taskId);
+      loadTasks();
+      if (expandedTaskId === taskId) setExpandedTaskId(null);
+    } catch (err) {
+      console.error('Failed to archive task:', err);
+    }
+  };
+
+  const filtered = statusFilter === 'all'
+    ? tasks.filter((t) => t.status !== 'archived')
+    : tasks.filter((t) => t.status === statusFilter);
+
+  const statusCounts = {};
+  for (const t of tasks) {
+    if (t.status !== 'archived') {
+      statusCounts[t.status] = (statusCounts[t.status] || 0) + 1;
+    }
+  }
+
+  return (
+    <main className="tasks-panel">
+      <div className="tasks-filters">
+        <button
+          className={`tasks-filter-btn ${statusFilter === 'all' ? 'active' : ''}`}
+          onClick={() => setStatusFilter('all')}
+        >
+          All ({tasks.filter((t) => t.status !== 'archived').length})
+        </button>
+        {STATUS_ORDER.map((s) => (
+          <button
+            key={s}
+            className={`tasks-filter-btn ${statusFilter === s ? 'active' : ''}`}
+            onClick={() => setStatusFilter(s)}
+          >
+            {STATUS_LABELS[s]} ({statusCounts[s] || 0})
+          </button>
+        ))}
+      </div>
+
+      <div className="tasks-list">
+        {loading && tasks.length === 0 && (
+          <div className="tasks-empty">Loading tasks...</div>
+        )}
+        {!loading && filtered.length === 0 && (
+          <div className="tasks-empty">No tasks{statusFilter !== 'all' ? ` with status "${STATUS_LABELS[statusFilter]}"` : ''}</div>
+        )}
+        {filtered.map((task) => (
+          <TaskCard
+            key={task.taskId}
+            task={task}
+            expanded={expandedTaskId === task.taskId}
+            onExpand={setExpandedTaskId}
+            onArchive={handleArchive}
+          />
+        ))}
+      </div>
+    </main>
+  );
+}
+
+// ── Main App ────────────────────────────────────────────────────────
+
 export default function App() {
   const [username, setUsername] = useState(() => localStorage.getItem('crosschat-username') || '');
   const [rooms, setRooms] = useState([]);
@@ -164,6 +411,7 @@ export default function App() {
   const [events, setEvents] = useState([]);
   const [peers, setPeers] = useState([]);
   const [error, setError] = useState(null);
+  const [activeTab, setActiveTab] = useState('chat');
 
   const activeRoomIdRef = useRef(activeRoomId);
   activeRoomIdRef.current = activeRoomId;
@@ -176,6 +424,9 @@ export default function App() {
       });
       return;
     }
+
+    // Task events are handled by TasksPanel polling; ignore here
+    if (data.type && data.type.startsWith('task.')) return;
 
     if (data.roomId !== activeRoomIdRef.current) return;
 
@@ -240,7 +491,6 @@ export default function App() {
   const handleSendMessage = async (text) => {
     try {
       await postMessage(activeRoomId, username, text);
-      // HTTP POST handler broadcasts to WebSocket clients — no need to also send via WS
     } catch (err) {
       setError(err.message);
     }
@@ -262,17 +512,40 @@ export default function App() {
       <Sidebar
         rooms={rooms}
         activeRoomId={activeRoomId}
-        onSelectRoom={setActiveRoomId}
+        onSelectRoom={(id) => { setActiveRoomId(id); setActiveTab('chat'); }}
         onCreateRoom={handleCreateRoom}
         peers={peers}
       />
-      <ChatArea
-        room={activeRoom}
-        messages={messages}
-        username={username}
-        onSendMessage={handleSendMessage}
-        events={events}
-      />
+      <div className="main-content">
+        <div className="tab-bar">
+          <div className="tab-bar-left">
+            <button
+              className={`tab-item ${activeTab === 'chat' ? 'active' : ''}`}
+              onClick={() => setActiveTab('chat')}
+            >
+              Chat{activeRoom ? ` — #${activeRoom.name}` : ''}
+            </button>
+            <button
+              className={`tab-item ${activeTab === 'tasks' ? 'active' : ''}`}
+              onClick={() => setActiveTab('tasks')}
+            >
+              Tasks
+            </button>
+          </div>
+        </div>
+
+        {activeTab === 'chat' ? (
+          <ChatArea
+            room={activeRoom}
+            messages={messages}
+            username={username}
+            onSendMessage={handleSendMessage}
+            events={events}
+          />
+        ) : (
+          <TasksPanel />
+        )}
+      </div>
     </div>
   );
 }

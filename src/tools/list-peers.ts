@@ -1,47 +1,33 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { listRegistryEntries } from '../registry/registry.js';
-import { pruneStaleEntries } from '../registry/cleanup.js';
+import type { AgentConnection } from '../hub/agent-connection.js';
 
-export function registerListPeers(server: McpServer, ownPeerId: string): void {
+export function registerListPeers(server: McpServer, agentConnection: AgentConnection): void {
   server.tool(
     'list_peers',
-    'Discover other CrossChat instances running on this machine. Returns an array of peers with their peerId (UUID — required for send_message and delegate_task), human-readable name, and registration time. Set includeMetadata to see each peer\'s working directory and parent process ID, which helps identify which project each instance is working on. Automatically prunes stale entries (dead processes) before returning results.',
+    'List all connected CrossChat instances. Shows name, status, working directory, and current room.',
     {
-      includeMetadata: z.boolean().optional().describe('If true, include each peer\'s working directory (cwd) and parent PID. Useful for identifying which project a peer is working on.'),
+      includeMetadata: z.boolean().optional().describe('Kept for compatibility — metadata is always included now'),
     },
-    async ({ includeMetadata }) => {
-      // Prune stale entries before listing
-      await pruneStaleEntries(ownPeerId);
+    async () => {
+      try {
+        const peers = await agentConnection.listPeers();
 
-      const entries = await listRegistryEntries();
-      const peers = entries
-        .filter((e) => e.peerId !== ownPeerId)
-        .map((e) => {
-          const peer: Record<string, unknown> = {
-            peerId: e.peerId,
-            name: e.name,
-            status: e.status ?? 'available',
-            statusDetail: e.statusDetail,
-            registeredAt: e.registeredAt,
-          };
-          if (e.orchestratorPeerId) {
-            peer.orchestratorPeerId = e.orchestratorPeerId;
-          }
-          if (includeMetadata && e.metadata) {
-            peer.metadata = e.metadata;
-          }
-          return peer;
-        });
-
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify({ peers, count: peers.length }, null, 2),
-          },
-        ],
-      };
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({ peers, count: peers.length }, null, 2),
+            },
+          ],
+        };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ error: `Failed to list peers: ${message}` }) }],
+          isError: true,
+        };
+      }
     }
   );
 }

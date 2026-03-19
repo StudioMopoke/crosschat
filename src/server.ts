@@ -1,44 +1,59 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { MessageStore } from './stores/message-store.js';
-import type { TaskStore } from './stores/task-store.js';
-import type { PeerRegistryEntry } from './types.js';
-import { registerListPeers } from './tools/list-peers.js';
+import type { AgentConnection } from './hub/agent-connection.js';
 import { registerSendMessage } from './tools/send-message.js';
 import { registerGetMessages } from './tools/get-messages.js';
-import { registerDelegateTask } from './tools/delegate-task.js';
-import { registerGetTaskStatus } from './tools/get-task-status.js';
 import { registerWaitForMessages } from './tools/wait-for-messages.js';
+import { registerListPeers } from './tools/list-peers.js';
 import { registerSetStatus } from './tools/set-status.js';
+import { registerJoinRoom } from './tools/join-room.js';
+import { registerCreateRoom } from './tools/create-room.js';
+import { registerDelegateTask } from './tools/delegate-task.js';
+import { registerClaimTask } from './tools/claim-task.js';
+import { registerAcceptClaim } from './tools/accept-claim.js';
+import { registerUpdateTask } from './tools/update-task.js';
 import { registerCompleteTask } from './tools/complete-task.js';
-import { registerChatSend } from './tools/chat-send.js';
+import { registerListTasks } from './tools/list-tasks.js';
+import { registerGetTaskStatus } from './tools/get-task-status.js';
 import { registerPrompts } from './prompts.js';
-import type { DashboardServer } from './dashboard/http-server.js';
 
 const SERVER_INSTRUCTIONS = `\
-CrossChat lets you talk to other Claude Code instances on this machine. You can discover them, send messages, and delegate tasks.
+CrossChat connects you to other Claude Code instances on this machine through a central hub server. \
+All communication happens through rooms — you are in one room at a time (default: "general").
 
 Your identity: **{peerName}** (peer ID: {peerId}). You are automatically registered and discoverable.
 
-## Tools summary
-- \`list_peers\` — find other instances (includes status, name, working directory)
-- \`send_message\` — send a message to a peer by ID
-- \`get_messages\` — check your inbox (use unreadOnly=true for new messages)
-- \`delegate_task\` — ask a peer to do work (returns taskId)
-- \`get_task_status\` — check progress of a delegated task
-- \`wait_for_messages\` — long-poll for incoming messages (for background listeners)
-- \`set_status\` — set yourself as available or busy
-- \`complete_task\` — report task results back to the delegator (use instead of send_message for task results)
-- \`chat_send_message\` — post a message to the dashboard UI (if dashboard is running)
+## Messaging
+- \`send_message\` — post a message to your current room (all agents in the room see it)
+- \`get_messages\` — read messages from your current room (use unreadOnly=true for new messages)
+- \`wait_for_messages\` — block until a message arrives in your current room
+- \`join_room\` — switch to a different room (implicitly leaves the current one)
+- \`create_room\` — create a new room and join it
+
+## Peers
+- \`list_peers\` — discover connected agents (includes status, name, working directory, current room)
+- \`set_status\` — update your availability (available or busy)
+
+## Task lifecycle
+Tasks follow a structured workflow: **delegate -> claim -> accept -> update -> complete**
+- \`delegate_task\` — create a task in the current room (optionally target a specific agent or filter by directory/project)
+- \`claim_task\` — bid on an open task (the creator decides who gets it)
+- \`accept_claim\` — accept an agent's bid on your task
+- \`update_task\` — append progress notes (supports markdown)
+- \`complete_task\` — mark a task done or failed with a result (supports markdown)
+- \`list_tasks\` — list tasks with optional filters (status, room, assignee)
+- \`get_task_status\` — get full task details including notes history
 
 ## Dashboard
 {dashboardInfo}
 
 ## Key rules
 - Use \`list_peers\` to discover peer IDs — never guess UUIDs.
+- All messaging is room-based — there is no direct P2P messaging.
+- Agents start in the "general" room. Use \`join_room\` to switch rooms.
 - Check a peer's status before delegating — don't send work to busy peers.
-- Set yourself to "busy" when working on a delegated task, "available" when done.
-- When you finish a task and set status to "available", the peer who delegated is automatically notified.
-- Messages are ephemeral — they don't survive restarts.
+- Set yourself to "busy" when working on a task, "available" when done.
+- Tasks are persistent and survive hub restarts. Messages are ephemeral.
 
 For full usage instructions, the user should run the /crosschat command.`;
 
@@ -46,18 +61,14 @@ export function createMcpServer(
   peerId: string,
   peerName: string,
   messageStore: MessageStore,
-  taskStore: TaskStore,
-  registryEntry: PeerRegistryEntry,
-  dashboard: DashboardServer | null,
-  dashboardInfo: { port: number } | { error: string } | null
+  agentConnection: AgentConnection,
+  dashboardInfo: { port: number } | { error: string }
 ): McpServer {
   let dashboardInfoStr: string;
-  if (dashboardInfo && 'port' in dashboardInfo) {
+  if ('port' in dashboardInfo) {
     dashboardInfoStr = `Running at http://localhost:${dashboardInfo.port}`;
-  } else if (dashboardInfo && 'error' in dashboardInfo) {
-    dashboardInfoStr = `Failed to start: ${dashboardInfo.error}`;
   } else {
-    dashboardInfoStr = 'Not available';
+    dashboardInfoStr = `Failed to start: ${dashboardInfo.error}`;
   }
 
   const instructions = SERVER_INSTRUCTIONS
@@ -68,23 +79,35 @@ export function createMcpServer(
   const server = new McpServer(
     {
       name: 'crosschat',
-      version: '0.1.0',
+      version: '0.6.2',
       description: 'Inter-instance communication for Claude Code and other LLM agents on a single device.',
     },
     { instructions }
   );
 
-  registerListPeers(server, peerId);
-  registerSendMessage(server, peerId, peerName);
+  // --- Messaging tools ---
+  registerSendMessage(server, agentConnection);
   registerGetMessages(server, messageStore);
-  registerDelegateTask(server, peerId, peerName, taskStore);
-  registerGetTaskStatus(server, taskStore);
   registerWaitForMessages(server, messageStore);
-  registerSetStatus(server, registryEntry);
-  registerCompleteTask(server, taskStore);
-  if (dashboard) {
-    registerChatSend(server, dashboard, peerName);
-  }
+
+  // --- Peer tools ---
+  registerListPeers(server, agentConnection);
+  registerSetStatus(server, agentConnection);
+
+  // --- Room tools ---
+  registerJoinRoom(server, agentConnection);
+  registerCreateRoom(server, agentConnection);
+
+  // --- Task tools ---
+  registerDelegateTask(server, agentConnection);
+  registerClaimTask(server, agentConnection);
+  registerAcceptClaim(server, agentConnection);
+  registerUpdateTask(server, agentConnection);
+  registerCompleteTask(server, agentConnection);
+  registerListTasks(server, agentConnection);
+  registerGetTaskStatus(server, agentConnection);
+
+  // --- Prompts ---
   registerPrompts(server, peerId, peerName);
 
   return server;

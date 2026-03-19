@@ -38,3 +38,26 @@ export async function postMessage(roomId, username, text) {
   if (!res.ok) throw new Error('Failed to send message');
   return res.json();
 }
+
+export async function fetchTasks() {
+  const res = await fetch(`${API_BASE}/tasks`);
+  if (!res.ok) throw new Error('Failed to fetch tasks');
+  return res.json();
+}
+
+export async function fetchTask(taskId) {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}`);
+  if (!res.ok) throw new Error('Failed to fetch task');
+  return res.json();
+}
+
+export async function archiveTask(taskId) {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/archive`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || 'Failed to archive task');
+  }
+  return res.json();
+}

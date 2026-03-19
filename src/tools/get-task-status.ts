@@ -1,45 +1,41 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { TaskStore } from '../stores/task-store.js';
+import type { AgentConnection } from '../hub/agent-connection.js';
 
-export function registerGetTaskStatus(server: McpServer, taskStore: TaskStore): void {
+export function registerGetTaskStatus(server: McpServer, agentConnection: AgentConnection): void {
   server.tool(
     'get_task_status',
-    'Poll the status of a task you previously delegated via delegate_task. Returns the current status (pending, in_progress, completed, failed, or timed_out), along with the task description, target peer info, timestamps, and any result or error message. Call this periodically after delegating to check if the peer has finished.',
+    'Get the full details of a task including its notes history and current status.',
     {
-      taskId: z.string().describe('The task ID returned by delegate_task'),
+      taskId: z.string().describe('The ID of the task to look up'),
     },
     async ({ taskId }) => {
-      const task = taskStore.getDelegated(taskId);
-      if (!task) {
+      try {
+        const { tasks } = await agentConnection.listTasks({});
+        const task = tasks.find((t) => t.taskId === taskId);
+
+        if (!task) {
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Task not found' }) }],
+            isError: true,
+          };
+        }
+
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Task not found' }) }],
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(task, null, 2),
+            },
+          ],
+        };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ error: `Failed to get task status: ${message}` }) }],
           isError: true,
         };
       }
-
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify(
-              {
-                taskId: task.taskId,
-                targetPeerId: task.targetPeerId,
-                targetName: task.targetName,
-                description: task.description,
-                status: task.status,
-                createdAt: task.createdAt,
-                updatedAt: task.updatedAt,
-                result: task.result,
-                error: task.error,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
     }
   );
 }

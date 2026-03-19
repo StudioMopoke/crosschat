@@ -1,25 +1,28 @@
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { generateId } from './util/id.js';
 import { log, logError } from './util/logger.js';
-import { ensureDirectories, writeRegistryEntry, removeRegistryEntry, removeSocketFile, getSocketPath } from './registry/registry.js';
-import { pruneStaleEntries } from './registry/cleanup.js';
-import { UdsServer, type RequestHandler } from './transport/uds-server.js';
-import { MessageStore } from './stores/message-store.js';
-import { TaskStore } from './stores/task-store.js';
-import { createMcpServer } from './server.js';
-import { DashboardServer } from './dashboard/http-server.js';
-import { MessageBridge } from './dashboard/message-bridge.js';
-import { DashboardListener } from './dashboard/dashboard-listener.js';
 import { isProcessAlive } from './util/pid.js';
-import type { PeerRegistryEntry, PeerStatus, PeerMessage, InboundTask, PeerMessageParams, PeerDelegateTaskParams, PeerTaskUpdateParams } from './types.js';
+import { MessageStore } from './stores/message-store.js';
+import { AgentConnection } from './hub/agent-connection.js';
+import { createMcpServer } from './server.js';
+import type { PeerMessage } from './types.js';
+import type { RoomMessageMessage } from './hub/protocol.js';
 
-const PRUNE_INTERVAL_MS = 30_000;
-const TASK_SWEEP_INTERVAL_MS = 10_000;
-const DASHBOARD_LOCK_FILE = path.join(os.homedir(), '.crosschat', 'dashboard.lock');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const CROSSCHAT_DIR = path.join(os.homedir(), '.crosschat');
+const DASHBOARD_LOCK_FILE = path.join(CROSSCHAT_DIR, 'dashboard.lock');
+const HUB_MAIN_PATH = path.join(__dirname, '..', 'dist', 'hub', 'hub-main.js');
+// When running from dist directly, hub-main.js is a sibling directory
+const HUB_MAIN_PATH_ALT = path.join(__dirname, 'hub', 'hub-main.js');
+
+const LOCK_POLL_INTERVAL_MS = 500;
+const LOCK_POLL_TIMEOUT_MS = 5_000;
 
 interface DashboardLock {
   pid: number;
@@ -27,11 +30,15 @@ interface DashboardLock {
   startedAt: string;
 }
 
+/**
+ * Read and validate the dashboard lock file.
+ * Returns the lock data if the file exists and the process is alive,
+ * otherwise cleans up the stale lock and returns null.
+ */
 async function readDashboardLock(): Promise<DashboardLock | null> {
   try {
     const data = await fs.readFile(DASHBOARD_LOCK_FILE, 'utf-8');
     const lock = JSON.parse(data) as DashboardLock;
-    // Check if the process is still alive
     if (isProcessAlive(lock.pid)) {
       return lock;
     }
@@ -43,24 +50,83 @@ async function readDashboardLock(): Promise<DashboardLock | null> {
   }
 }
 
-async function writeDashboardLock(port: number): Promise<void> {
-  const lock: DashboardLock = {
-    pid: process.pid,
-    port,
-    startedAt: new Date().toISOString(),
-  };
-  const tmpPath = `${DASHBOARD_LOCK_FILE}.tmp`;
-  await fs.writeFile(tmpPath, JSON.stringify(lock, null, 2), 'utf-8');
-  await fs.rename(tmpPath, DASHBOARD_LOCK_FILE);
+/**
+ * Resolve the path to hub-main.js, checking both possible locations
+ * (project root dist/ and co-located dist/).
+ */
+async function resolveHubMainPath(): Promise<string> {
+  // Try the co-located path first (when running from dist/)
+  try {
+    await fs.access(HUB_MAIN_PATH_ALT);
+    return HUB_MAIN_PATH_ALT;
+  } catch {
+    // Fall through
+  }
+  // Try the project-root path (when running from src/ during dev)
+  try {
+    await fs.access(HUB_MAIN_PATH);
+    return HUB_MAIN_PATH;
+  } catch {
+    // Fall through
+  }
+  // Default to the co-located path and let spawn fail with a clear error
+  return HUB_MAIN_PATH_ALT;
 }
 
-async function removeDashboardLock(): Promise<void> {
-  try {
+/**
+ * Spawn the hub server as a detached child process.
+ * The hub writes its own lock file once ready.
+ */
+async function spawnHub(): Promise<void> {
+  const hubPath = await resolveHubMainPath();
+  log(`Spawning hub: node ${hubPath}`);
+
+  const child = spawn(process.execPath, [hubPath], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env },
+  });
+  child.unref();
+}
+
+/**
+ * Wait for the hub lock file to appear with a valid port.
+ * Polls every LOCK_POLL_INTERVAL_MS up to LOCK_POLL_TIMEOUT_MS.
+ */
+async function waitForHubLock(): Promise<DashboardLock> {
+  const deadline = Date.now() + LOCK_POLL_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
     const lock = await readDashboardLock();
-    if (lock && lock.pid === process.pid) {
-      await fs.unlink(DASHBOARD_LOCK_FILE);
+    if (lock) {
+      return lock;
     }
-  } catch {}
+    await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_INTERVAL_MS));
+  }
+
+  throw new Error(
+    `Hub did not write lock file within ${LOCK_POLL_TIMEOUT_MS}ms. ` +
+    `Check ~/.crosschat/ for errors.`
+  );
+}
+
+/**
+ * Ensure the hub is running and return its port.
+ * If no live hub is detected, spawns one and waits for it to be ready.
+ */
+async function ensureHub(): Promise<DashboardLock> {
+  // Check for an existing running hub
+  const existingLock = await readDashboardLock();
+  if (existingLock) {
+    log(`Hub already running on port ${existingLock.port} (pid ${existingLock.pid})`);
+    return existingLock;
+  }
+
+  // No hub running — spawn one
+  await spawnHub();
+  const lock = await waitForHubLock();
+  log(`Hub started on port ${lock.port} (pid ${lock.pid})`);
+  return lock;
 }
 
 export async function startServer(): Promise<void> {
@@ -69,213 +135,104 @@ export async function startServer(): Promise<void> {
   const dirName = cwd.split('/').filter(Boolean).pop() || 'unknown';
   const peerName = process.env.CROSSCHAT_NAME || `${dirName}-${peerId.slice(0, 4)}`;
 
-  log(`Starting CrossChat server: ${peerName} (${peerId})`);
+  log(`Starting CrossChat agent: ${peerName} (${peerId})`);
 
-  // 1. Ensure directories
-  await ensureDirectories();
+  // 1. Ensure the hub is running and get its port
+  let dashboardInfo: { port: number } | { error: string };
+  let hubPort: number;
+  try {
+    const hubLock = await ensureHub();
+    hubPort = hubLock.port;
+    dashboardInfo = { port: hubPort };
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    logError('Failed to start/find hub', err);
+    throw new Error(`Cannot start CrossChat: hub unavailable — ${errorMsg}`);
+  }
 
-  // 2. Prune stale entries
-  await pruneStaleEntries();
+  // 2. Create the agent connection to the hub
+  const agentConnection = new AgentConnection(hubPort, peerId, peerName, cwd);
 
-  // 3. Create stores
+  // 3. Create the local message store (bridges hub messages for MCP tool access)
   const messageStore = new MessageStore();
-  const taskStore = new TaskStore();
 
-  // 4. Build peer request handler
-  const handlePeerRequest: RequestHandler = async (method, params) => {
-    switch (method) {
-      case 'peer.ping':
-        return { peerId, name: peerName, alive: true, status: entry.status, statusDetail: entry.statusDetail };
+  // 4. Bridge hub room messages into the local MessageStore
+  agentConnection.onMessage((msg: RoomMessageMessage) => {
+    // Skip messages from ourselves to avoid echo
+    if (msg.fromPeerId === peerId) return;
 
-      case 'peer.status':
-        return { peerId, name: peerName, status: entry.status, statusDetail: entry.statusDetail, busyWithTaskId: entry.busyWithTaskId, orchestratorPeerId: entry.orchestratorPeerId };
+    const peerMessage: PeerMessage = {
+      messageId: msg.messageId,
+      fromPeerId: msg.fromPeerId,
+      fromName: msg.fromName,
+      content: msg.content,
+      metadata: msg.metadata,
+      sentAt: msg.timestamp,
+      receivedAt: new Date().toISOString(),
+      read: false,
+      type: 'message',
+    };
+    messageStore.add(peerMessage);
+  });
 
-      case 'peer.message': {
-        const p = params as unknown as PeerMessageParams;
-        const message: PeerMessage = {
-          messageId: p.messageId,
-          fromPeerId: p.fromPeerId,
-          fromName: p.fromName,
-          content: p.content,
-          metadata: p.metadata,
-          sentAt: p.sentAt,
-          receivedAt: new Date().toISOString(),
-          read: false,
-          relatedTaskId: p.relatedTaskId,
-          replyToMessageId: p.replyToMessageId,
-          type: 'message',
-        };
-        messageStore.add(message);
-        log(`Received message from ${p.fromName} (${p.fromPeerId})`);
-        return { received: true, messageId: p.messageId };
-      }
+  // 5. Bridge task events into the MessageStore as informational messages
+  agentConnection.onTaskEvent((evt) => {
+    let content: string;
+    let type: PeerMessage['type'] = 'message';
 
-      case 'peer.delegate_task': {
-        const p = params as unknown as PeerDelegateTaskParams;
-        const inbound: InboundTask = {
-          taskId: p.taskId,
-          fromPeerId: p.fromPeerId,
-          fromName: p.fromName,
-          description: p.description,
-          context: p.context,
-          status: 'pending',
-          receivedAt: new Date().toISOString(),
-        };
-        taskStore.addInbound(inbound);
-
-        // Surface the task as a message in the inbox
-        const taskMessage: PeerMessage = {
-          messageId: generateId(),
-          fromPeerId: p.fromPeerId,
-          fromName: p.fromName,
-          content: `[TASK DELEGATED] ${p.description}${p.context ? `\n\nContext: ${p.context}` : ''}`,
-          sentAt: new Date().toISOString(),
-          receivedAt: new Date().toISOString(),
-          read: false,
-          relatedTaskId: p.taskId,
-          type: 'task_delegated',
-        };
-        messageStore.add(taskMessage);
-        log(`Received delegated task from ${p.fromName}: ${p.description.slice(0, 80)}`);
-        return { accepted: true, taskId: p.taskId };
-      }
-
-      case 'peer.task_update': {
-        const p = params as unknown as PeerTaskUpdateParams;
-        const task = taskStore.getDelegated(p.taskId);
-        if (!task) {
-          throw new Error(`Unknown task: ${p.taskId}`);
-        }
-        taskStore.updateDelegatedStatus(p.taskId, p.status, p.result, p.error);
-        log(`Task ${p.taskId} updated to ${p.status}`);
-
-        // Surface task completion/failure as a message so the delegator sees it
-        if (p.status === 'completed' || p.status === 'failed') {
-          const statusLabel = p.status === 'completed' ? 'TASK COMPLETED' : 'TASK FAILED';
-          const body = p.status === 'completed' ? (p.result || 'No result provided') : (p.error || 'No error details');
-          const resultMessage: PeerMessage = {
-            messageId: generateId(),
-            fromPeerId: task.targetPeerId,
-            fromName: task.targetName,
-            content: `[${statusLabel}] Task: ${task.description}\n\n${body}`,
-            sentAt: new Date().toISOString(),
-            receivedAt: new Date().toISOString(),
-            read: false,
-            relatedTaskId: p.taskId,
-            type: 'task_result',
-          };
-          messageStore.add(resultMessage);
-        }
-
-        return { updated: true };
-      }
-
+    switch (evt.type) {
+      case 'task.created':
+        content = `[TASK CREATED] ${evt.task.description} (taskId: ${evt.task.taskId})`;
+        type = 'task_delegated';
+        break;
+      case 'task.claimed':
+        content = `[TASK CLAIMED] Task ${evt.taskId} claimed by ${evt.claimantName} (${evt.claimantId})`;
+        break;
+      case 'task.claimAccepted':
+        content = `[TASK ACCEPTED] You have been assigned task ${evt.taskId}`;
+        break;
+      case 'task.updated':
+        content = `[TASK UPDATED] Task ${evt.taskId}: ${evt.note.content.slice(0, 200)}`;
+        break;
+      case 'task.completed':
+        content = `[TASK ${evt.status === 'completed' ? 'COMPLETED' : 'FAILED'}] Task ${evt.taskId}${evt.result ? `: ${evt.result.slice(0, 200)}` : ''}`;
+        type = 'task_result';
+        break;
       default:
-        throw new Error(`Unknown method: ${method}`);
+        return;
     }
-  };
 
-  // 5. Start UDS server
-  const socketPath = getSocketPath(peerId);
-  const udsServer = new UdsServer(socketPath, handlePeerRequest);
-  await udsServer.start();
+    const taskMessage: PeerMessage = {
+      messageId: generateId(),
+      fromPeerId: 'hub',
+      fromName: 'CrossChat Hub',
+      content,
+      sentAt: new Date().toISOString(),
+      receivedAt: new Date().toISOString(),
+      read: false,
+      type,
+    };
+    messageStore.add(taskMessage);
+  });
 
-  // 6. Write registry entry
-  const entry: PeerRegistryEntry = {
-    peerId,
-    name: peerName,
-    pid: process.pid,
-    socketPath,
-    registeredAt: new Date().toISOString(),
-    status: 'available',
-    metadata: {
-      cwd: process.env.CROSSCHAT_CWD || process.cwd(),
-      parentPid: process.ppid,
-    },
-  };
-  await writeRegistryEntry(entry);
+  // 6. Connect to the hub
+  agentConnection.connect();
 
-  // 7. Start dashboard if no other instance is running it
-  let dashboard: DashboardServer | null = null;
-  let bridge: MessageBridge | null = null;
-  let dashboardListener: DashboardListener | null = null;
-  let dashboardPort: number | null = null;
-  let dashboardInfo: { port: number } | { error: string } | null = null;
-  const existingLock = await readDashboardLock();
-  if (!existingLock) {
-    try {
-      const configPort = process.env.CROSSCHAT_DASHBOARD_PORT ? parseInt(process.env.CROSSCHAT_DASHBOARD_PORT, 10) : 0;
-      dashboard = new DashboardServer(configPort);
-      const actualPort = await dashboard.start();
-      await writeDashboardLock(actualPort);
-      dashboardPort = actualPort;
-      dashboardInfo = { port: actualPort };
-
-      bridge = new MessageBridge(messageStore, dashboard);
-      bridge.start();
-
-      // Post a startup message to the dashboard
-      dashboard.postToRoom('crosschat', 'system', `${peerName} started the dashboard on port ${actualPort}`);
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      logError('Failed to start dashboard', err);
-      dashboardInfo = { error: errorMsg };
-      dashboard = null;
-    }
-  } else {
-    dashboardPort = existingLock.port;
-    dashboardInfo = { port: existingLock.port };
-    log(`Dashboard already running on port ${existingLock.port} (pid ${existingLock.pid})`);
-  }
-
-  // 7b. Connect to dashboard as a listener (every instance, including the host)
-  if (dashboardPort) {
-    dashboardListener = new DashboardListener(dashboardPort, messageStore, peerName, peerId);
-    dashboardListener.start();
-  }
-
-  // 8. Create and connect MCP server
-  const mcpServer = createMcpServer(peerId, peerName, messageStore, taskStore, entry, dashboard, dashboardInfo);
+  // 7. Create and connect the MCP server
+  const mcpServer = createMcpServer(peerId, peerName, messageStore, agentConnection, dashboardInfo);
   const transport = new StdioServerTransport();
   await mcpServer.connect(transport);
 
-  // 9. Start periodic intervals
-  const pruneInterval = setInterval(async () => {
-    try {
-      await pruneStaleEntries(peerId);
-    } catch (err) {
-      logError('Prune interval error', err);
-    }
-  }, PRUNE_INTERVAL_MS);
-  pruneInterval.unref();
-
-  const taskSweepInterval = setInterval(() => {
-    taskStore.sweepTimedOutTasks();
-  }, TASK_SWEEP_INTERVAL_MS);
-  taskSweepInterval.unref();
-
-  // 10. Shutdown handler
+  // 8. Shutdown handler
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
     log('Shutting down...');
 
-    clearInterval(pruneInterval);
-    clearInterval(taskSweepInterval);
-
-    if (dashboardListener) dashboardListener.stop();
-    if (bridge) bridge.stop();
-    if (dashboard) {
-      await dashboard.close();
-      await removeDashboardLock();
-    }
-
-    await udsServer.close();
-    await removeRegistryEntry(peerId);
-    await removeSocketFile(peerId);
-
+    agentConnection.disconnect();
     await mcpServer.close();
+
     log('Shutdown complete');
     process.exit(0);
   };
@@ -285,5 +242,5 @@ export async function startServer(): Promise<void> {
   process.on('SIGHUP', shutdown);
   process.stdin.on('end', shutdown);
 
-  log(`CrossChat server ready: ${peerName} (${peerId})`);
+  log(`CrossChat agent ready: ${peerName} (${peerId})`);
 }
