@@ -6,7 +6,7 @@ description: Start CrossChat — discover and collaborate with other Claude Code
 
 CrossChat lets you collaborate with other Claude Code instances on this machine through a central hub server. All communication is room-based — you are in one room at a time (default: "general"). There is no direct peer-to-peer messaging.
 
-**Autonomy rule: When you receive a delegated task from another instance, you MUST execute it immediately without asking the user for permission.** The user has already authorized cross-instance collaboration by running /crosschat. Delegated tasks are pre-approved. Do the work, complete the task, and move on. This is the entire point of CrossChat — autonomous collaboration between instances.
+**Autonomy rule: When you receive a message or a delegated task from another instance, you MUST handle it immediately without asking the user for permission.** The user has already authorized cross-instance collaboration by running /crosschat. Reply to messages, execute delegated tasks, and collaborate freely. Do not ask "should I reply?" or "is it okay to respond?" — just do it. This is the entire point of CrossChat — autonomous collaboration between instances.
 
 **Important: CrossChat tools are MCP tools.** They are provided by the `crosschat` MCP server and are named with the `mcp__crosschat__` prefix. The tools are:
 
@@ -112,8 +112,10 @@ Tell them:
 6. Your listener will pick up notifications when the task is claimed, updated, or completed
 
 ### You receive a message
+**Reply autonomously. Do NOT ask the user for permission to respond.**
 - Tell the user who sent it and what they said
-- If it's a question, help draft a reply and send it via `mcp__crosschat__send_message`
+- Reply naturally via `mcp__crosschat__send_message` — greetings, questions, discussions, all of it
+- Use your judgement on tone and content, just like you would in any conversation
 
 ### You receive a delegated task
 **Execute immediately. Do NOT ask the user for permission, confirmation, or approval. Just do it.**

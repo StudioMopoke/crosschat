@@ -25,7 +25,7 @@ function UsernamePrompt({ onSubmit }) {
   );
 }
 
-function PeersBar({ peers }) {
+function PeersBar({ peers, onMentionPeer }) {
   if (!peers.length) return null;
   return (
     <div className="peers-bar">
@@ -35,7 +35,9 @@ function PeersBar({ peers }) {
           <div
             key={peer.peerId}
             className={`peer-item ${peer.status}`}
-            title={`${peer.name}\n${peer.cwd || 'unknown directory'}\nStatus: ${peer.status}${peer.statusDetail ? ` — ${peer.statusDetail}` : ''}\nRoom: ${peer.currentRoom || 'general'}`}
+            title={`${peer.name}\n${peer.cwd || 'unknown directory'}\nStatus: ${peer.status}${peer.statusDetail ? ` — ${peer.statusDetail}` : ''}\nRoom: ${peer.currentRoom || 'general'}\nClick to mention`}
+            onClick={() => onMentionPeer && onMentionPeer(peer.name)}
+            style={{ cursor: 'pointer' }}
           >
             <div className={`peer-icon ${peer.status}`}>
               <span className="peer-icon-letter">{peer.name.charAt(0).toUpperCase()}</span>
@@ -52,7 +54,7 @@ function PeersBar({ peers }) {
   );
 }
 
-function Sidebar({ rooms, activeRoomId, onSelectRoom, onCreateRoom, peers }) {
+function Sidebar({ rooms, activeRoomId, onSelectRoom, onCreateRoom, peers, onMentionPeer }) {
   const [newRoomName, setNewRoomName] = useState('');
   const [creating, setCreating] = useState(false);
 
@@ -70,7 +72,7 @@ function Sidebar({ rooms, activeRoomId, onSelectRoom, onCreateRoom, peers }) {
       <div className="sidebar-header">
         <h1>CrossChat</h1>
       </div>
-      <PeersBar peers={peers} />
+      <PeersBar peers={peers} onMentionPeer={onMentionPeer} />
       <ul className="room-list">
         {rooms.map((room) => (
           <li
@@ -99,19 +101,33 @@ function Sidebar({ rooms, activeRoomId, onSelectRoom, onCreateRoom, peers }) {
   );
 }
 
-function ChatArea({ room, messages, username, onSendMessage, events }) {
+function ChatArea({ room, messages, username, onSendMessage, events, replyTarget, onClearReply }) {
   const [text, setText] = useState('');
   const messagesEndRef = useRef(null);
+  const inputRef = useRef(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, events]);
+
+  // When replyTarget changes (from peer click or message reply), focus the input
+  useEffect(() => {
+    if (replyTarget) {
+      inputRef.current?.focus();
+    }
+  }, [replyTarget]);
 
   const handleSend = (e) => {
     e.preventDefault();
     if (!text.trim()) return;
     onSendMessage(text.trim());
     setText('');
+    if (onClearReply) onClearReply();
+  };
+
+  const handleReply = (msg) => {
+    setText(`@${msg.username} `);
+    inputRef.current?.focus();
   };
 
   if (!room) {
@@ -135,6 +151,15 @@ function ChatArea({ room, messages, username, onSendMessage, events }) {
               <span className="message-time">
                 {new Date(msg.timestamp).toLocaleTimeString()}
               </span>
+              {msg.username !== username && (
+                <button
+                  className="reply-btn"
+                  onClick={() => handleReply(msg)}
+                  title={`Reply to ${msg.username}`}
+                >
+                  Reply
+                </button>
+              )}
             </div>
             <div className="message-text">{msg.text}</div>
           </div>
@@ -146,12 +171,19 @@ function ChatArea({ room, messages, username, onSendMessage, events }) {
         ))}
         <div ref={messagesEndRef} />
       </div>
+      {replyTarget && (
+        <div className="reply-bar">
+          <span className="reply-bar-text">Replying to <strong>@{replyTarget}</strong></span>
+          <button className="reply-bar-close" onClick={onClearReply}>&times;</button>
+        </div>
+      )}
       <form className="message-form" onSubmit={handleSend}>
         <input
+          ref={inputRef}
           autoFocus
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder="Type a message..."
+          placeholder={replyTarget ? `Reply to @${replyTarget}...` : 'Type a message...'}
         />
         <button type="submit" disabled={!text.trim()}>Send</button>
       </form>
@@ -412,6 +444,7 @@ export default function App() {
   const [peers, setPeers] = useState([]);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('chat');
+  const [replyTarget, setReplyTarget] = useState(null);
 
   const activeRoomIdRef = useRef(activeRoomId);
   activeRoomIdRef.current = activeRoomId;
@@ -515,6 +548,7 @@ export default function App() {
         onSelectRoom={(id) => { setActiveRoomId(id); setActiveTab('chat'); }}
         onCreateRoom={handleCreateRoom}
         peers={peers}
+        onMentionPeer={(name) => { setReplyTarget(name); setActiveTab('chat'); }}
       />
       <div className="main-content">
         <div className="tab-bar">
@@ -541,6 +575,8 @@ export default function App() {
             username={username}
             onSendMessage={handleSendMessage}
             events={events}
+            replyTarget={replyTarget}
+            onClearReply={() => setReplyTarget(null)}
           />
         ) : (
           <TasksPanel />
