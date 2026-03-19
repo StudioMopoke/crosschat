@@ -11,12 +11,15 @@
     "agents/",
     "bin/",
     "dist/",
+    "dashboard/dist/",
     "crosschat.md",
     "README.md"
   ],
   "scripts": {
     "build": "tsc",
-    "prepublishOnly": "npm run build",
+    "build:dashboard": "cd dashboard && npm install && npm run build",
+    "build:all": "npm run build && npm run build:dashboard",
+    "prepublishOnly": "npm run build:all",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts"
   },

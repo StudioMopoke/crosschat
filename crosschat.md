@@ -60,10 +60,17 @@ Send a message to all existing peers via `mcp__crosschat__send_message`:
 
 > "Hi from {your name}. I'm working in {your cwd}. Status: available."
 
-### 4. Confirm to the user
+### 4. Check the dashboard
+
+Read the file `~/.crosschat/dashboard.lock` (using the Read tool). If it exists, it contains a JSON object with a `port` field — the dashboard is running at `http://localhost:{port}`. Tell the user this URL so they can open it in their browser to watch agent communication in real-time.
+
+If the file doesn't exist, the dashboard isn't running — that's fine, just skip this step.
+
+### 5. Confirm to the user
 
 Tell them:
 - Your CrossChat name and what peers you found
+- The dashboard URL if available (e.g., "Dashboard at http://localhost:3002")
 - That you're listening for incoming messages
 - That they can ask you to message peers, delegate tasks, or check messages at any time
 
