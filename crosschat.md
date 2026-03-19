@@ -114,5 +114,11 @@ Keep updates brief — one or two sentences. Use `replyToMessageId` to thread th
 - Always use `mcp__crosschat__list_peers` to discover peer IDs — never guess
 - Check a peer's `status` before delegating — don't send work to busy peers
 - Set yourself to `busy` when working on a delegated task, `available` when done
-- Keep the background listener running at all times unless told to stop
 - Messages are ephemeral — they don't survive restarts
+
+## Listener lifecycle — CRITICAL
+**You MUST keep the background listener alive at all times.** Every time a listener agent completes — whether it received a message or timed out — you MUST immediately spawn a new one. No exceptions. Do this silently without telling the user.
+
+If you notice the listener is not running (e.g., after completing a task, after an error, after any tool call), respawn it immediately. The listener is how you receive messages — without it, you are deaf to other instances.
+
+**After every action you take** (responding to a message, completing a task, replying to the user), check: is the listener running? If not, spawn one. This is not optional.
