@@ -11,6 +11,7 @@ const SETTINGS_JSON = path.join(os.homedir(), ".claude", "settings.json");
 const COMMANDS_DIR = path.join(os.homedir(), ".claude", "commands");
 const COMMAND_SOURCE = path.join(__dirname, "..", "crosschat.md");
 const COMMAND_TARGET = path.join(COMMANDS_DIR, "crosschat.md");
+const HOOK_SOURCE = path.join(__dirname, "..", "hooks", "permission-hook.sh");
 const MCP_KEY = "crosschat";
 
 const CROSSCHAT_PERMISSIONS = [
@@ -119,7 +120,32 @@ function install() {
       addedPerms++;
     }
   }
-  if (addedPerms > 0) {
+  // 2b. Add permission hook to settings (PreToolUse)
+  if (fs.existsSync(HOOK_SOURCE)) {
+    if (!settings.hooks) settings.hooks = {};
+    if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = [];
+
+    const hookCommand = HOOK_SOURCE;
+    const alreadyInstalled = settings.hooks.PreToolUse.some((entry) =>
+      entry.hooks &&
+      entry.hooks.some((h) => h.command && h.command.includes("permission-hook.sh"))
+    );
+
+    if (!alreadyInstalled) {
+      settings.hooks.PreToolUse.push({
+        matcher: "",
+        hooks: [
+          {
+            type: "command",
+            command: hookCommand,
+            timeout: 300,
+          },
+        ],
+      });
+    }
+  }
+
+  if (addedPerms > 0 || fs.existsSync(HOOK_SOURCE)) {
     writeSettings(SETTINGS_JSON, settings);
   }
 
@@ -134,6 +160,9 @@ function install() {
   }
 
   console.log("Installed /crosschat command to " + COMMAND_TARGET);
+  if (fs.existsSync(HOOK_SOURCE)) {
+    console.log("Installed permission hook (PreToolUse → dashboard)");
+  }
   console.log("");
   if (serverEntry) {
     console.log("  MCP server: " + serverEntry);
@@ -159,7 +188,23 @@ function uninstall() {
     removedAnything = true;
   }
 
-  // 2. Remove /crosschat command
+  // 2. Remove permission hook from settings
+  const settings = readSettings(SETTINGS_JSON);
+  if (settings.hooks && settings.hooks.PreToolUse) {
+    const before = settings.hooks.PreToolUse.length;
+    settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter((entry) =>
+      !(entry.hooks && entry.hooks.some((h) => h.command && h.command.includes("permission-hook.sh")))
+    );
+    if (settings.hooks.PreToolUse.length < before) {
+      if (settings.hooks.PreToolUse.length === 0) delete settings.hooks.PreToolUse;
+      if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+      writeSettings(SETTINGS_JSON, settings);
+      console.log("Removed permission hook from " + SETTINGS_JSON);
+      removedAnything = true;
+    }
+  }
+
+  // 3. Remove /crosschat command
   if (fs.existsSync(COMMAND_TARGET)) {
     fs.unlinkSync(COMMAND_TARGET);
     console.log("Removed /crosschat command");

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { fetchRooms, createRoom, fetchMessages, postMessage, fetchPeers, fetchTasks, fetchTask, archiveTask } from './api';
+import { fetchRooms, createRoom, fetchMessages, postMessage, fetchPeers, fetchTasks, fetchTask, archiveTask, fetchPermissions, decidePermission } from './api';
 import { useWebSocket } from './useWebSocket';
 import './App.css';
 
@@ -533,6 +533,79 @@ function TasksPanel() {
   );
 }
 
+// ── Permission Popup ─────────────────────────────────────────────────
+
+function toolInputSummary(toolName, toolInput) {
+  if (!toolInput) return null;
+  if (toolName === 'Bash' && toolInput.command) return toolInput.command;
+  if ((toolName === 'Edit' || toolName === 'Write' || toolName === 'Read') && toolInput.file_path) return toolInput.file_path;
+  if (toolName === 'Glob' && toolInput.pattern) return toolInput.pattern;
+  if (toolName === 'Grep' && toolInput.pattern) return toolInput.pattern;
+  if (toolName === 'WebFetch' && toolInput.url) return toolInput.url;
+  if (toolName === 'WebSearch' && toolInput.query) return toolInput.query;
+  // MCP tools
+  if (toolName.startsWith('mcp__')) return JSON.stringify(toolInput).slice(0, 120);
+  // Fallback: show first string value
+  const firstVal = Object.values(toolInput).find((v) => typeof v === 'string');
+  return firstVal || null;
+}
+
+function PermissionToast({ permission, onDecide }) {
+  const [deciding, setDeciding] = useState(false);
+
+  const handle = async (decision) => {
+    setDeciding(true);
+    await onDecide(permission.id, decision);
+  };
+
+  const summary = toolInputSummary(permission.toolName, permission.toolInput);
+
+  return (
+    <div className={`permission-toast ${deciding ? 'deciding' : ''}`}>
+      <div className="permission-toast-header">
+        <span className="permission-agent-badge">
+          <span className="permission-agent-letter">{(permission.agentName || '?').charAt(0).toUpperCase()}</span>
+          {permission.agentName}
+        </span>
+        <span className="permission-tool-badge">{permission.toolName}</span>
+      </div>
+      {permission.description && (
+        <div className="permission-description">{permission.description}</div>
+      )}
+      {summary && (
+        <div className="permission-context"><code>{summary}</code></div>
+      )}
+      <div className="permission-actions">
+        <button
+          className="permission-btn allow"
+          onClick={() => handle('approved')}
+          disabled={deciding}
+        >
+          Allow
+        </button>
+        <button
+          className="permission-btn deny"
+          onClick={() => handle('denied')}
+          disabled={deciding}
+        >
+          Deny
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PermissionPopups({ permissions, onDecide }) {
+  if (!permissions.length) return null;
+  return (
+    <div className="permission-popups">
+      {permissions.map((p) => (
+        <PermissionToast key={p.id} permission={p} onDecide={onDecide} />
+      ))}
+    </div>
+  );
+}
+
 // ── Main App ────────────────────────────────────────────────────────
 
 export default function App() {
@@ -545,6 +618,7 @@ export default function App() {
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('chat');
   const [replyTarget, setReplyTarget] = useState(null);
+  const [permissions, setPermissions] = useState([]);
 
   const activeRoomIdRef = useRef(activeRoomId);
   activeRoomIdRef.current = activeRoomId;
@@ -555,6 +629,19 @@ export default function App() {
         if (prev.some((r) => r.id === data.room.id)) return prev;
         return [...prev, data.room];
       });
+      return;
+    }
+
+    // Permission events
+    if (data.type === 'permission.request') {
+      setPermissions((prev) => {
+        if (prev.some((p) => p.id === data.permission.id)) return prev;
+        return [...prev, data.permission];
+      });
+      return;
+    }
+    if (data.type === 'permission.decided') {
+      setPermissions((prev) => prev.filter((p) => p.id !== data.id));
       return;
     }
 
@@ -592,8 +679,21 @@ export default function App() {
     const loadPeers = () => fetchPeers().then(setPeers).catch(() => {});
     loadPeers();
     const peersInterval = setInterval(loadPeers, 10000);
+
+    // Load any pending permissions
+    fetchPermissions().then(setPermissions).catch(() => {});
+
     return () => clearInterval(peersInterval);
   }, [username]);
+
+  const handlePermissionDecide = async (id, decision) => {
+    try {
+      await decidePermission(id, decision);
+      setPermissions((prev) => prev.filter((p) => p.id !== id));
+    } catch (err) {
+      setError(err.message);
+    }
+  };
 
   useEffect(() => {
     if (!activeRoomId) return;
@@ -637,6 +737,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <PermissionPopups permissions={permissions} onDecide={handlePermissionDecide} />
       {error && (
         <div className="error-banner" onClick={() => setError(null)}>
           {error} (click to dismiss)

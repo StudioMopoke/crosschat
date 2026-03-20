@@ -37,6 +37,19 @@ interface DashboardLock {
   startedAt: string;
 }
 
+interface PendingPermission {
+  id: string;
+  agentName: string;
+  agentPeerId?: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  description?: string;
+  status: 'pending' | 'approved' | 'denied';
+  reason?: string;
+  createdAt: string;
+  decidedAt?: string;
+}
+
 interface ConnectedAgent {
   peerId: string;
   name: string;
@@ -142,6 +155,7 @@ export async function startHub(): Promise<void> {
   const rooms = new Map<string, Room>();
   const browserClients = new Set<WebSocket>();
   const browserRooms = new WeakMap<WebSocket, Set<string>>();
+  const pendingPermissions = new Map<string, PendingPermission>();
 
   // Initialize TaskManager
   const taskManager = new TaskManager();
@@ -893,6 +907,88 @@ export async function startHub(): Promise<void> {
     }
 
     res.json({ messagesCleared, tasksArchived });
+  });
+
+  // ── REST: Permissions ────────────────────────────────────────────
+
+  app.get('/api/permissions', (_req, res) => {
+    const list = [...pendingPermissions.values()].filter((p) => p.status === 'pending');
+    res.json(list);
+  });
+
+  app.post('/api/permissions', (req, res) => {
+    const { agentName, agentPeerId, toolName, toolInput, description } = req.body;
+    if (!toolName) {
+      res.status(400).json({ error: 'toolName is required' });
+      return;
+    }
+
+    const id = generateId();
+    const permission: PendingPermission = {
+      id,
+      agentName: agentName || 'unknown',
+      agentPeerId,
+      toolName,
+      toolInput: toolInput || {},
+      description,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+    pendingPermissions.set(id, permission);
+
+    // Broadcast to all browser clients
+    broadcastToAllBrowsers({
+      type: 'permission.request',
+      permission,
+    });
+
+    log(`Permission request: ${permission.agentName} wants to use ${toolName} (${id})`);
+    res.status(201).json(permission);
+  });
+
+  app.get('/api/permissions/:id', (req, res) => {
+    const permission = pendingPermissions.get(req.params.id);
+    if (!permission) {
+      res.status(404).json({ error: 'Permission request not found' });
+      return;
+    }
+    res.json(permission);
+  });
+
+  app.post('/api/permissions/:id/decide', (req, res) => {
+    const permission = pendingPermissions.get(req.params.id);
+    if (!permission) {
+      res.status(404).json({ error: 'Permission request not found' });
+      return;
+    }
+    if (permission.status !== 'pending') {
+      res.status(409).json({ error: `Already decided: ${permission.status}` });
+      return;
+    }
+
+    const { decision, reason } = req.body;
+    if (decision !== 'approved' && decision !== 'denied') {
+      res.status(400).json({ error: 'decision must be "approved" or "denied"' });
+      return;
+    }
+
+    permission.status = decision;
+    permission.reason = reason;
+    permission.decidedAt = new Date().toISOString();
+
+    // Broadcast decision to all browsers
+    broadcastToAllBrowsers({
+      type: 'permission.decided',
+      id: permission.id,
+      status: permission.status,
+      reason: permission.reason,
+    });
+
+    log(`Permission ${decision}: ${permission.agentName} / ${permission.toolName} (${permission.id})`);
+    res.json(permission);
+
+    // Clean up after 60 seconds
+    setTimeout(() => pendingPermissions.delete(permission.id), 60_000);
   });
 
   // ── SPA fallback ───────────────────────────────────────────────

@@ -51,6 +51,25 @@ export async function fetchTask(taskId) {
   return res.json();
 }
 
+export async function fetchPermissions() {
+  const res = await fetch(`${API_BASE}/permissions`);
+  if (!res.ok) throw new Error('Failed to fetch permissions');
+  return res.json();
+}
+
+export async function decidePermission(id, decision, reason) {
+  const res = await fetch(`${API_BASE}/permissions/${id}/decide`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision, reason }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || 'Failed to decide permission');
+  }
+  return res.json();
+}
+
 export async function archiveTask(taskId) {
   const res = await fetch(`${API_BASE}/tasks/${taskId}/archive`, {
     method: 'POST',
