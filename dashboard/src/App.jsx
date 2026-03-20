@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { fetchRooms, createRoom, fetchMessages, postMessage, fetchPeers, fetchTasks, fetchTask, archiveTask, fetchPermissions, decidePermission } from './api';
+import { fetchRooms, createRoom, fetchMessages, postMessage, fetchPeers, fetchTasks, fetchTask, archiveTask, fetchPermissions, decidePermission, fetchProjects, createProject, deleteProject, launchProject } from './api';
 import { useWebSocket } from './useWebSocket';
 import './App.css';
 
@@ -533,6 +533,196 @@ function TasksPanel() {
   );
 }
 
+// ── Projects Panel ───────────────────────────────────────────────────
+
+function ProjectCard({ project, onLaunch, onRemove }) {
+  const [launching, setLaunching] = useState(false);
+  const [removing, setRemoving] = useState(false);
+
+  const handleLaunch = async () => {
+    setLaunching(true);
+    try {
+      await onLaunch(project.id);
+    } finally {
+      setTimeout(() => setLaunching(false), 2000);
+    }
+  };
+
+  const handleRemove = async () => {
+    setRemoving(true);
+    try {
+      await onRemove(project.id);
+    } finally {
+      setRemoving(false);
+    }
+  };
+
+  const dirName = project.path.split('/').filter(Boolean).pop() || project.path;
+
+  return (
+    <div className="project-card">
+      <div className="project-card-header">
+        <div className="project-card-top">
+          <span className="project-card-name">{project.name}</span>
+          {project.activeAgents > 0 && (
+            <span className="project-active-indicator">
+              <span className="project-active-dot" />
+              {project.activeAgents} agent{project.activeAgents !== 1 ? 's' : ''}
+            </span>
+          )}
+        </div>
+        <div className="project-card-path" title={project.path}>
+          {project.path}
+        </div>
+        {project.description && (
+          <div className="project-card-description">{project.description}</div>
+        )}
+      </div>
+      <div className="project-card-actions">
+        <button
+          className="project-launch-btn"
+          onClick={handleLaunch}
+          disabled={launching}
+        >
+          {launching ? 'Launching...' : 'Launch'}
+        </button>
+        <button
+          className="project-remove-btn"
+          onClick={handleRemove}
+          disabled={removing}
+        >
+          Remove
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ProjectsPanel({ peers }) {
+  const [projects, setProjects] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newPath, setNewPath] = useState('');
+  const [newDesc, setNewDesc] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState(null);
+
+  const loadProjects = useCallback(() => {
+    fetchProjects()
+      .then((data) => { setProjects(data); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    loadProjects();
+    const interval = setInterval(loadProjects, 10000);
+    return () => clearInterval(interval);
+  }, [loadProjects]);
+
+  const handleCreate = async (e) => {
+    e.preventDefault();
+    if (!newName.trim() || !newPath.trim()) return;
+    setCreating(true);
+    setError(null);
+    try {
+      await createProject(newName.trim(), newPath.trim(), newDesc.trim() || undefined);
+      setNewName('');
+      setNewPath('');
+      setNewDesc('');
+      setShowForm(false);
+      loadProjects();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleLaunch = async (id) => {
+    try {
+      await launchProject(id);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const handleRemove = async (id) => {
+    try {
+      await deleteProject(id);
+      loadProjects();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  return (
+    <main className="projects-panel">
+      <div className="projects-header">
+        <span className="projects-title">Registered Projects</span>
+        <button
+          className="projects-add-btn"
+          onClick={() => setShowForm(!showForm)}
+        >
+          {showForm ? 'Cancel' : '+ Register'}
+        </button>
+      </div>
+
+      {error && (
+        <div className="projects-error" onClick={() => setError(null)}>
+          {error}
+        </div>
+      )}
+
+      {showForm && (
+        <form className="project-form" onSubmit={handleCreate}>
+          <input
+            autoFocus
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            placeholder="Project name..."
+            maxLength={60}
+            disabled={creating}
+          />
+          <input
+            value={newPath}
+            onChange={(e) => setNewPath(e.target.value)}
+            placeholder="Absolute path (e.g. /Users/you/project)..."
+            disabled={creating}
+          />
+          <input
+            value={newDesc}
+            onChange={(e) => setNewDesc(e.target.value)}
+            placeholder="Description (optional)..."
+            maxLength={200}
+            disabled={creating}
+          />
+          <button type="submit" disabled={!newName.trim() || !newPath.trim() || creating}>
+            {creating ? 'Registering...' : 'Register Project'}
+          </button>
+        </form>
+      )}
+
+      <div className="projects-list">
+        {loading && projects.length === 0 && (
+          <div className="projects-empty">Loading projects...</div>
+        )}
+        {!loading && projects.length === 0 && !showForm && (
+          <div className="projects-empty">No projects registered yet. Click + Register to add one.</div>
+        )}
+        {projects.map((project) => (
+          <ProjectCard
+            key={project.id}
+            project={project}
+            onLaunch={handleLaunch}
+            onRemove={handleRemove}
+          />
+        ))}
+      </div>
+    </main>
+  );
+}
+
 // ── Permission Popup ─────────────────────────────────────────────────
 
 function toolInputSummary(toolName, toolInput) {
@@ -766,6 +956,12 @@ export default function App() {
             >
               Tasks
             </button>
+            <button
+              className={`tab-item ${activeTab === 'projects' ? 'active' : ''}`}
+              onClick={() => setActiveTab('projects')}
+            >
+              Projects
+            </button>
           </div>
         </div>
 
@@ -780,8 +976,10 @@ export default function App() {
             onClearReply={() => setReplyTarget(null)}
             peers={peers}
           />
-        ) : (
+        ) : activeTab === 'tasks' ? (
           <TasksPanel />
+        ) : (
+          <ProjectsPanel peers={peers} />
         )}
       </div>
     </div>

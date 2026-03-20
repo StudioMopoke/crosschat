@@ -70,6 +70,43 @@ export async function decidePermission(id, decision, reason) {
   return res.json();
 }
 
+export async function fetchProjects() {
+  const res = await fetch(`${API_BASE}/projects`);
+  if (!res.ok) throw new Error('Failed to fetch projects');
+  return res.json();
+}
+
+export async function createProject(name, projPath, description) {
+  const res = await fetch(`${API_BASE}/projects`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, path: projPath, description }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || 'Failed to create project');
+  }
+  return res.json();
+}
+
+export async function deleteProject(id) {
+  const res = await fetch(`${API_BASE}/projects/${id}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || 'Failed to delete project');
+  }
+  return res.json();
+}
+
+export async function launchProject(id) {
+  const res = await fetch(`${API_BASE}/projects/${id}/launch`, { method: 'POST' });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || 'Failed to launch project');
+  }
+  return res.json();
+}
+
 export async function archiveTask(taskId) {
   const res = await fetch(`${API_BASE}/tasks/${taskId}/archive`, {
     method: 'POST',

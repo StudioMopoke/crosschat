@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import http from 'node:http';
+import { spawn } from 'node:child_process';
 import express from 'express';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -25,6 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const CROSSCHAT_DIR = path.join(os.homedir(), '.crosschat');
 const DASHBOARD_LOCK_FILE = path.join(CROSSCHAT_DIR, 'dashboard.lock');
+const PROJECTS_FILE = path.join(CROSSCHAT_DIR, 'projects.json');
 const REGISTER_TIMEOUT_MS = 5_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const PONG_TIMEOUT_MS = 10_000;
@@ -35,6 +37,14 @@ interface DashboardLock {
   pid: number;
   port: number;
   startedAt: string;
+}
+
+interface Project {
+  id: string;
+  name: string;
+  path: string;
+  description?: string;
+  createdAt: string;
 }
 
 interface PendingPermission {
@@ -125,6 +135,25 @@ async function removeDashboardLock(): Promise<void> {
   }
 }
 
+// ── Project store helpers ────────────────────────────────────────────
+
+async function loadProjects(): Promise<Map<string, Project>> {
+  try {
+    const data = await fs.readFile(PROJECTS_FILE, 'utf-8');
+    const list = JSON.parse(data) as Project[];
+    return new Map(list.map((p) => [p.id, p]));
+  } catch {
+    return new Map();
+  }
+}
+
+async function persistProjects(projects: Map<string, Project>): Promise<void> {
+  const list = [...projects.values()];
+  const tmpPath = `${PROJECTS_FILE}.tmp`;
+  await fs.writeFile(tmpPath, JSON.stringify(list, null, 2), 'utf-8');
+  await fs.rename(tmpPath, PROJECTS_FILE);
+}
+
 // ── Version from package.json ────────────────────────────────────────
 
 function getServerVersion(): string {
@@ -156,6 +185,7 @@ export async function startHub(): Promise<void> {
   const browserClients = new Set<WebSocket>();
   const browserRooms = new WeakMap<WebSocket, Set<string>>();
   const pendingPermissions = new Map<string, PendingPermission>();
+  const projects = await loadProjects();
 
   // Initialize TaskManager
   const taskManager = new TaskManager();
@@ -736,7 +766,7 @@ export async function startHub(): Promise<void> {
   app.use((_req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', 'Content-Type');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     next();
   });
 
@@ -989,6 +1019,112 @@ export async function startHub(): Promise<void> {
 
     // Clean up after 60 seconds
     setTimeout(() => pendingPermissions.delete(permission.id), 60_000);
+  });
+
+  // ── REST: Projects ──────────────────────────────────────────────
+
+  app.get('/api/projects', (_req, res) => {
+    const list = [...projects.values()].map((p) => {
+      // Count active agents whose cwd matches this project path
+      let activeAgents = 0;
+      for (const agent of agents.values()) {
+        if (agent.cwd === p.path) activeAgents++;
+      }
+      return { ...p, activeAgents };
+    });
+    list.sort((a, b) => a.name.localeCompare(b.name));
+    res.json(list);
+  });
+
+  app.post('/api/projects', async (req, res) => {
+    const { name, path: projPath, description } = req.body;
+    if (!name || typeof name !== 'string' || name.trim().length === 0) {
+      res.status(400).json({ error: 'Project name is required' });
+      return;
+    }
+    if (!projPath || typeof projPath !== 'string' || projPath.trim().length === 0) {
+      res.status(400).json({ error: 'Project path is required' });
+      return;
+    }
+
+    const resolvedPath = path.resolve(projPath.trim());
+
+    // Validate directory exists
+    try {
+      const stat = await fs.stat(resolvedPath);
+      if (!stat.isDirectory()) {
+        res.status(400).json({ error: 'Path is not a directory' });
+        return;
+      }
+    } catch {
+      res.status(400).json({ error: 'Directory does not exist' });
+      return;
+    }
+
+    // Check for duplicate path
+    for (const existing of projects.values()) {
+      if (existing.path === resolvedPath) {
+        res.status(409).json({ error: 'A project with this path is already registered' });
+        return;
+      }
+    }
+
+    const project: Project = {
+      id: generateId(),
+      name: name.trim(),
+      path: resolvedPath,
+      description: description?.trim() || undefined,
+      createdAt: new Date().toISOString(),
+    };
+    projects.set(project.id, project);
+    await persistProjects(projects);
+
+    log(`Project registered: ${project.name} (${project.path})`);
+    res.status(201).json(project);
+  });
+
+  app.delete('/api/projects/:id', async (req, res) => {
+    const project = projects.get(req.params.id);
+    if (!project) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+    projects.delete(req.params.id);
+    await persistProjects(projects);
+    log(`Project removed: ${project.name} (${project.path})`);
+    res.json({ deleted: true });
+  });
+
+  app.post('/api/projects/:id/launch', async (req, res) => {
+    const project = projects.get(req.params.id);
+    if (!project) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    // Re-validate directory
+    try {
+      const stat = await fs.stat(project.path);
+      if (!stat.isDirectory()) {
+        res.status(400).json({ error: 'Project directory no longer exists' });
+        return;
+      }
+    } catch {
+      res.status(400).json({ error: 'Project directory no longer exists' });
+      return;
+    }
+
+    // Escape path for AppleScript (replace backslashes and double-quotes)
+    const escapedPath = project.path.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const script = `tell application "Terminal"
+  activate
+  do script "cd \\"${escapedPath}\\" && claude"
+end tell`;
+
+    spawn('osascript', ['-e', script], { detached: true, stdio: 'ignore' }).unref();
+
+    log(`Launched Claude Code in: ${project.path}`);
+    res.json({ launched: true, projectId: project.id, path: project.path });
   });
 
   // ── SPA fallback ───────────────────────────────────────────────
