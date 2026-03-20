@@ -235,6 +235,22 @@ export class TaskManager {
     return task;
   }
 
+  /** Archive all completed/failed tasks in a room. Returns count of tasks archived. */
+  async archiveTerminal(roomId?: string): Promise<number> {
+    let count = 0;
+    for (const task of this.tasks.values()) {
+      if (roomId && task.roomId !== roomId) continue;
+      if (task.status === 'completed' || task.status === 'failed') {
+        task.status = 'archived';
+        task.updatedAt = new Date().toISOString();
+        await this.persist(task);
+        count++;
+      }
+    }
+    if (count > 0) log(`Archived ${count} terminal task(s)${roomId ? ` in room ${roomId}` : ''}`);
+    return count;
+  }
+
   get(taskId: string): Task | undefined {
     return this.tasks.get(taskId);
   }

@@ -90,4 +90,10 @@ export class MessageStore {
       msg.read = true;
     }
   }
+
+  clear(): number {
+    const count = this.messages.length;
+    this.messages = [];
+    return count;
+  }
 }

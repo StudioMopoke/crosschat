@@ -10,6 +10,7 @@ import {
   type PeerInfo,
   type PeersMessage,
   type RoomMessageMessage,
+  type SessionClearedMessage,
   type TaskCreatedMessage,
   type TaskClaimedMessage,
   type TaskClaimAcceptedMessage,
@@ -259,6 +260,31 @@ export class AgentConnection {
     this.send({ type: 'task.complete', taskId, result, status, error });
   }
 
+  /** Clear session state: messages from current room and optionally archive completed tasks. */
+  clearSession(opts?: { messages?: boolean; tasks?: boolean }): Promise<{ messagesCleared: number; tasksArchived: number }> {
+    const requestId = generateId();
+    this.send({
+      type: 'agent.clearSession',
+      requestId,
+      messages: opts?.messages,
+      tasks: opts?.tasks,
+    });
+
+    return new Promise<{ messagesCleared: number; tasksArchived: number }>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(requestId);
+        reject(new Error('clearSession request timed out'));
+      }, 10_000);
+      timer.unref();
+
+      this.pendingRequests.set(requestId, {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        timer,
+      });
+    });
+  }
+
   // ─── Event registration ────────────────────────────────────────
 
   /** Register a callback invoked for every incoming room message. */
@@ -313,6 +339,17 @@ export class AgentConnection {
           clearTimeout(pending.timer);
           this.pendingRequests.delete(msg.requestId);
           pending.resolve({ tasks: (msg as TasksMessage).tasks });
+        }
+        break;
+      }
+
+      case 'session.cleared': {
+        const pending = this.pendingRequests.get(msg.requestId);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pendingRequests.delete(msg.requestId);
+          const cleared = msg as SessionClearedMessage;
+          pending.resolve({ messagesCleared: cleared.messagesCleared, tasksArchived: cleared.tasksArchived });
         }
         break;
       }

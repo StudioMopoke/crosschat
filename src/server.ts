@@ -15,6 +15,7 @@ import { registerUpdateTask } from './tools/update-task.js';
 import { registerCompleteTask } from './tools/complete-task.js';
 import { registerListTasks } from './tools/list-tasks.js';
 import { registerGetTaskStatus } from './tools/get-task-status.js';
+import { registerClearSession } from './tools/clear-session.js';
 import { registerPrompts } from './prompts.js';
 
 const SERVER_INSTRUCTIONS = `\
@@ -29,6 +30,9 @@ Your identity: **{peerName}** (peer ID: {peerId}). You are automatically registe
 - \`wait_for_messages\` — block until a message arrives in your current room
 - \`join_room\` — switch to a different room (implicitly leaves the current one)
 - \`create_room\` — create a new room and join it
+
+## Session
+- \`clear_session\` — clear messages from your current room and local buffer (optionally archive completed tasks)
 
 ## @mentions
 Use @mentions to target specific agents: \`@agent-name\` delivers only to that agent, \`@here\` broadcasts to everyone in the room. Messages without mentions are broadcast to all (backward compatible).
@@ -100,6 +104,9 @@ export function createMcpServer(
   // --- Room tools ---
   registerJoinRoom(server, agentConnection);
   registerCreateRoom(server, agentConnection);
+
+  // --- Session tools ---
+  registerClearSession(server, agentConnection, messageStore);
 
   // --- Task tools ---
   registerDelegateTask(server, agentConnection);

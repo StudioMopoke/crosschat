@@ -598,6 +598,44 @@ export async function startHub(): Promise<void> {
     }
   }
 
+  async function handleClearSession(
+    agent: ConnectedAgent,
+    msg: AgentMessage & { type: 'agent.clearSession' },
+  ): Promise<void> {
+    const clearMessages = msg.messages !== false; // default true
+    const clearTasks = msg.tasks === true;        // default false
+    let messagesCleared = 0;
+    let tasksArchived = 0;
+
+    if (clearMessages) {
+      const room = rooms.get(agent.currentRoom);
+      if (room) {
+        messagesCleared = room.messages.length;
+        room.messages = [];
+        // Notify browsers that the room was cleared
+        broadcastToRoomBrowsers(agent.currentRoom, {
+          type: 'sessionCleared',
+          roomId: agent.currentRoom,
+          clearedBy: agent.name,
+          messagesCleared,
+        });
+      }
+    }
+
+    if (clearTasks) {
+      tasksArchived = await taskManager.archiveTerminal(agent.currentRoom);
+    }
+
+    sendToWs(agent.ws, {
+      type: 'session.cleared',
+      requestId: msg.requestId,
+      messagesCleared,
+      tasksArchived,
+    });
+
+    log(`Session cleared by ${agent.name}: ${messagesCleared} message(s), ${tasksArchived} task(s) archived`);
+  }
+
   function handleListTasks(agent: ConnectedAgent, msg: AgentMessage & { type: 'agent.listTasks' }): void {
     const filter: { status?: any; roomId?: string; assignedTo?: string } = {};
     if (msg.status) filter.status = msg.status;
@@ -666,6 +704,9 @@ export async function startHub(): Promise<void> {
         break;
       case 'agent.listTasks':
         handleListTasks(agent, msg);
+        break;
+      case 'agent.clearSession':
+        await handleClearSession(agent, msg);
         break;
       default:
         sendError(ws, `Unknown message type: ${(msg as any).type}`);
@@ -819,6 +860,39 @@ export async function startHub(): Promise<void> {
       const message = err instanceof Error ? err.message : 'Failed to archive task';
       res.status(400).json({ error: message });
     }
+  });
+
+  // ── REST: Clear session ──────────────────────────────────────────
+
+  app.post('/api/rooms/:roomId/clear', async (req, res) => {
+    const room = rooms.get(req.params.roomId);
+    if (!room) {
+      res.status(404).json({ error: 'Room not found' });
+      return;
+    }
+
+    const clearMessages = req.body?.messages !== false;
+    const clearTasks = req.body?.tasks === true;
+
+    let messagesCleared = 0;
+    let tasksArchived = 0;
+
+    if (clearMessages) {
+      messagesCleared = room.messages.length;
+      room.messages = [];
+      broadcastToRoomBrowsers(req.params.roomId, {
+        type: 'sessionCleared',
+        roomId: req.params.roomId,
+        clearedBy: 'dashboard',
+        messagesCleared,
+      });
+    }
+
+    if (clearTasks) {
+      tasksArchived = await taskManager.archiveTerminal(req.params.roomId);
+    }
+
+    res.json({ messagesCleared, tasksArchived });
   });
 
   // ── SPA fallback ───────────────────────────────────────────────
