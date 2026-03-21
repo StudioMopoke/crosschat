@@ -1,0 +1,59 @@
+{
+  "name": "@studiomopoke/crosschat",
+  "version": "1.5.1",
+  "description": "MCP server for inter-instance Claude Code communication",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "crosschat": "bin/cli.cjs"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "hooks/",
+    "dashboard/dist/",
+    "crosschat.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "build:dashboard": "cd dashboard && npm install && npm run build",
+    "build:all": "npm run build && npm run build:dashboard",
+    "prepublishOnly": "npm run build:all",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "ai",
+    "agentic",
+    "collaboration",
+    "inter-instance",
+    "crosschat"
+  ],
+  "author": "StudioMopoke",
+  "license": "BUSL-1.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/StudioMopoke/crosschat"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "express": "^5.2.1",
+    "ws": "^8.19.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
