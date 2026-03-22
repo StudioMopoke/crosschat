@@ -439,6 +439,33 @@ export async function startHub(): Promise<void> {
     });
   }
 
+  // ── Activity room ────────────────────────────────────────────
+
+  /** Post a system event to the CrossChat Activity room. */
+  function postActivity(content: string, importance: MessageImportance = 'comment'): void {
+    const room = rooms.get('crosschat');
+    if (!room) return;
+
+    const msg: ChatMessage = {
+      messageId: generateId(),
+      roomId: 'crosschat',
+      fromPeerId: 'system',
+      fromName: 'system',
+      content,
+      timestamp: new Date().toISOString(),
+      source: 'system',
+      importance,
+    };
+
+    room.messages.push(msg);
+    broadcastRoomMessage('crosschat', msg);
+
+    // Drop oldest messages when cap is exceeded (no digest for activity room)
+    if (room.messages.length > ROOM_MESSAGE_CAP) {
+      room.messages = room.messages.slice(-ROOM_MESSAGE_CAP);
+    }
+  }
+
   // ── Digest system ─────────────────────────────────────────────
 
   /**
@@ -447,6 +474,7 @@ export async function startHub(): Promise<void> {
    */
   async function enforceRoomMessageCap(room: Room): Promise<void> {
     if (room.messages.length <= ROOM_MESSAGE_CAP) return;
+    if (room.id === 'crosschat') return; // activity room handles its own cap via postActivity()
 
     const overflow = room.messages.length - ROOM_MESSAGE_CAP;
     const evicted = room.messages.splice(0, overflow);
@@ -495,6 +523,7 @@ export async function startHub(): Promise<void> {
       broadcastToRoomBrowsers(room.id, { type: 'task.created', task: summary });
 
       log(`Digest task ${task.taskId} created for room ${room.id}`);
+      postActivity(`Room "${room.name}" hit message cap — auto-digest initiated`);
     } catch (err) {
       logError(`Failed to create digest task for room ${room.id}`, err);
     }
@@ -574,6 +603,8 @@ export async function startHub(): Promise<void> {
     }
 
     log(`Digest completed for room ${roomId}: ${digestPath}`);
+    const digestRoom = rooms.get(roomId);
+    postActivity(`Digest completed for room "${digestRoom?.name ?? roomId}"`);
   }
 
   // ── Agent removal ──────────────────────────────────────────────
@@ -584,10 +615,12 @@ export async function startHub(): Promise<void> {
     agents.delete(peerId);
     log(`Agent disconnected: ${agent.name} (${peerId})`);
     broadcastToAllBrowsers({ type: 'peerDisconnected', peerId, name: agent.name });
+    postActivity(`${agent.name} disconnected`);
 
     // Start idle shutdown timer if no agents remain
     if (agents.size === 0 && !idleShutdownTimer) {
       log(`No agents connected — hub will auto-shutdown in ${IDLE_SHUTDOWN_MS / 1000}s`);
+      postActivity(`No agents connected — idle shutdown in ${IDLE_SHUTDOWN_MS / 1000}s`);
       idleShutdownTimer = setTimeout(() => {
         if (agents.size === 0) {
           shutdown('idle (no agents for 5 minutes)');
@@ -603,6 +636,7 @@ export async function startHub(): Promise<void> {
     agent.status = msg.status;
     agent.statusDetail = msg.detail;
     log(`Agent ${agent.name} status: ${msg.status}${msg.detail ? ` (${msg.detail})` : ''}`);
+    postActivity(`${agent.name} -> ${msg.status}${msg.detail ? ` (${msg.detail})` : ''}`, 'chitchat');
   }
 
   function handleJoinRoom(agent: ConnectedAgent, msg: AgentMessage & { type: 'agent.joinRoom' }): void {
@@ -635,6 +669,7 @@ export async function startHub(): Promise<void> {
     }
 
     log(`Agent ${agent.name} joined room ${msg.roomId}`);
+    postActivity(`${agent.name} joined room "${room.name}"`, 'chitchat');
   }
 
   function handleCreateRoom(agent: ConnectedAgent, msg: AgentMessage & { type: 'agent.createRoom' }): void {
@@ -661,6 +696,7 @@ export async function startHub(): Promise<void> {
     });
 
     log(`Room created: ${room.id} by ${agent.name}`);
+    postActivity(`${agent.name} created room "${room.name}"`);
   }
 
   function handleSendMessage(agent: ConnectedAgent, msg: AgentMessage & { type: 'agent.sendMessage' }): void {
@@ -724,6 +760,9 @@ export async function startHub(): Promise<void> {
       // Broadcast to all agents in the room (including creator) and browsers
       broadcastToRoomAgents(agent.currentRoom, { type: 'task.created', task: summary });
       broadcastToRoomBrowsers(agent.currentRoom, { type: 'task.created', task: summary });
+
+      const targetDesc = task.filter?.agentId ? ` -> ${task.filter.agentId}` : '';
+      postActivity(`${agent.name} delegated task "${task.description}"${targetDesc}`);
     } catch (err) {
       sendError(agent.ws, err instanceof Error ? err.message : 'Failed to create task', msg.requestId);
     }
@@ -754,6 +793,8 @@ export async function startHub(): Promise<void> {
 
       // Broadcast to dashboard
       broadcastToAllBrowsers({ type: 'task.claimed', taskId: task.taskId, claimantId: agent.peerId, claimantName: agent.name });
+
+      postActivity(`${agent.name} claimed task "${task.description}"`, 'chitchat');
     } catch (err) {
       sendError(agent.ws, err instanceof Error ? err.message : 'Failed to claim task');
     }
@@ -784,6 +825,8 @@ export async function startHub(): Promise<void> {
 
       // Broadcast to dashboard
       broadcastToAllBrowsers({ type: 'task.claimAccepted', taskId: task.taskId, assignedTo: task.claimantId ?? '' });
+
+      postActivity(`${agent.name} accepted claim from ${task.claimantName ?? 'unknown'}`, 'chitchat');
     } catch (err) {
       sendError(agent.ws, err instanceof Error ? err.message : 'Failed to accept claim');
     }
@@ -865,6 +908,12 @@ export async function startHub(): Promise<void> {
 
       // Broadcast to dashboard
       broadcastToAllBrowsers({ type: 'task.completed', taskId: task.taskId, status: msg.status, result: msg.result });
+
+      if (msg.status === 'completed') {
+        postActivity(`${agent.name} completed task "${task.description}"`, 'important');
+      } else {
+        postActivity(`${agent.name} failed task "${task.description}"`, 'important');
+      }
 
       // Check if this is a digest task completion
       if (msg.status === 'completed' && activeDigestTasks.get(task.roomId) === task.taskId) {
@@ -985,6 +1034,7 @@ export async function startHub(): Promise<void> {
       });
 
       log(`Digest requested by ${agent.name} for room ${room.id}: ${messagesToDigest.length} message(s), task ${task.taskId}`);
+      postActivity(`${agent.name} requested digest for room "${room.name}" (${messagesToDigest.length} messages)`);
     } catch (err) {
       logError(`Failed to create digest task for room ${room.id}`, err);
       sendError(agent.ws, 'Failed to create digest task', msg.requestId);
@@ -1525,6 +1575,7 @@ end tell`;
     spawn('osascript', ['-e', script], { detached: true, stdio: 'ignore' }).unref();
 
     log(`Launched Claude Code in: ${instance.path}`);
+    postActivity(`Launched Claude Code at ${instance.path}`);
     res.json({ launched: true, instanceId: instance.id, path: instance.path });
   });
 
@@ -1634,6 +1685,7 @@ end tell`;
           const existing = agents.get(msg.peerId);
           if (existing) {
             log(`Replacing existing connection for agent ${msg.peerId}`);
+            postActivity(`${existing.name} reconnected (replaced existing connection)`);
             existing.ws.close(4003, 'Replaced by new connection');
             agents.delete(msg.peerId);
           }
@@ -1655,6 +1707,7 @@ end tell`;
 
           log(`Agent registered: ${agent.name} (${agent.peerId}), cwd=${agent.cwd}`);
           broadcastToAllBrowsers({ type: 'peerConnected', peer: buildPeerInfo(agent) });
+          postActivity(`${agent.name} connected (cwd: ${agent.cwd})`);
 
           // Auto-register agent's working directory as an instance
           autoRegisterInstance(agent.cwd).catch((err) => {
@@ -1784,6 +1837,7 @@ end tell`;
         const pongTimer = setTimeout(() => {
           if (!alive) {
             log(`Agent ${agent.name} (${agent.peerId}) failed heartbeat, terminating`);
+            postActivity(`${agent.name} heartbeat failed — disconnecting`, 'important');
             agent.ws.terminate();
             removeAgent(agent.peerId);
           }
@@ -1847,20 +1901,8 @@ end tell`;
   await writeDashboardLock(actualPort);
   log(`Hub started on port ${actualPort} (pid ${process.pid})`);
 
-  // Post a startup message to the crosschat room
-  const startupMsg: ChatMessage = {
-    messageId: generateId(),
-    roomId: 'crosschat',
-    fromPeerId: 'system',
-    fromName: 'system',
-    content: `Hub started on port ${actualPort}`,
-    timestamp: new Date().toISOString(),
-    source: 'agent',
-  };
-  const crosschatRoom = rooms.get('crosschat');
-  if (crosschatRoom) {
-    crosschatRoom.messages.push(startupMsg);
-  }
+  // Post startup event to the activity room
+  postActivity(`Hub started on port ${actualPort}`, 'important');
 
   // ── Graceful shutdown ──────────────────────────────────────────
 
@@ -1872,8 +1914,10 @@ end tell`;
 
     if (signal) {
       log(`Received ${signal}, shutting down...`);
+      postActivity(`Hub shutting down (${signal})`, 'important');
     } else {
       log('Shutting down...');
+      postActivity('Hub shutting down', 'important');
     }
 
     // Stop timers
