@@ -67,6 +67,53 @@ fi
 TOOL_INPUT=$(echo "$INPUT" | jq -c '.tool_input // {}')
 DESCRIPTION=$(echo "$INPUT" | jq -r '.tool_input.description // empty')
 
+# ── Check existing Claude Code permissions ────────────────────────
+# Skip the dashboard for tools already allowed in settings files.
+
+get_tool_input_value() {
+  case "$TOOL_NAME" in
+    Bash)            echo "$TOOL_INPUT" | jq -r '.command // empty' ;;
+    Read|Write|Edit) echo "$TOOL_INPUT" | jq -r '.file_path // empty' ;;
+    Glob)            echo "$TOOL_INPUT" | jq -r '.pattern // empty' ;;
+    Grep)            echo "$TOOL_INPUT" | jq -r '.pattern // empty' ;;
+    *)               echo "" ;;
+  esac
+}
+
+is_allowed_by() {
+  local settings_file="$1"
+  [ -f "$settings_file" ] || return 1
+
+  local rules
+  rules=$(jq -r '(.permissions.allow // [])[]' "$settings_file" 2>/dev/null) || return 1
+  [ -z "$rules" ] && return 1
+
+  local input_value
+  input_value=$(get_tool_input_value)
+
+  while IFS= read -r rule; do
+    [ -z "$rule" ] && continue
+
+    if [[ "$rule" =~ ^([A-Za-z_:]+)\((.+)\)$ ]]; then
+      # Pattern rule: ToolName(glob-pattern)
+      if [ "${BASH_REMATCH[1]}" = "$TOOL_NAME" ] && [ -n "$input_value" ] && [[ "$input_value" == ${BASH_REMATCH[2]} ]]; then
+        return 0
+      fi
+    elif [ "$rule" = "$TOOL_NAME" ]; then
+      # Bare tool name — allow all uses
+      return 0
+    fi
+  done <<< "$rules"
+
+  return 1
+}
+
+if is_allowed_by "$HOME/.claude/settings.json" || \
+   is_allowed_by ".claude/settings.json" || \
+   is_allowed_by ".claude/settings.local.json"; then
+  exit 0  # Already permitted — fall through to normal flow
+fi
+
 # ── POST permission request to hub ────────────────────────────────
 
 RESPONSE=$(curl -s -X POST "${HUB_URL}/api/permissions" \
