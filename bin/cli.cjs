@@ -60,10 +60,24 @@ function writeSettings(filePath, settings) {
   fs.writeFileSync(filePath, JSON.stringify(settings, null, 2) + "\n", "utf8");
 }
 
+function findGlobalBinary() {
+  // Check if `crosschat` is available in PATH (from npm install -g)
+  const { execFileSync } = require("child_process");
+  try {
+    const binPath = execFileSync("which", ["crosschat"], { encoding: "utf8" }).trim();
+    if (binPath && fs.existsSync(binPath)) {
+      return binPath;
+    }
+  } catch {
+    // Not in PATH
+  }
+  return null;
+}
+
 function resolveServerEntry() {
   // Try to find the server in common locations
   const candidates = [
-    // Global install
+    // Relative to this CLI script (works for global install and local dev)
     path.join(__dirname, "..", "dist", "index.js"),
     // npm root -g based
     path.join(
@@ -87,8 +101,6 @@ function resolveServerEntry() {
 }
 
 function install() {
-  const serverEntry = resolveServerEntry();
-
   // 1. Install MCP server config to ~/.claude.json
   const claudeJson = readSettings(CLAUDE_JSON);
 
@@ -98,14 +110,17 @@ function install() {
 
   const isUpdate = !!claudeJson.mcpServers[MCP_KEY];
 
-  if (serverEntry) {
-    // Direct path — works for global installs and local dev
+  // Prefer the global binary (resolves via PATH, so upgrades take effect
+  // automatically). Fall back to npx for non-global installs.
+  const globalBin = findGlobalBinary();
+
+  if (globalBin) {
     claudeJson.mcpServers[MCP_KEY] = {
-      command: "node",
-      args: [serverEntry],
+      command: "crosschat",
+      args: ["serve"],
     };
   } else {
-    // Fallback to npx — works when installed via npx
+    // Fallback to npx — always pulls the latest version
     claudeJson.mcpServers[MCP_KEY] = {
       command: "npx",
       args: ["-y", "@studiomopoke/crosschat", "serve"],
@@ -126,28 +141,33 @@ function install() {
       addedPerms++;
     }
   }
-  // 2b. Add permission hook to settings (PreToolUse)
+  // 2b. Add or update permission hook in settings (PreToolUse)
   if (fs.existsSync(HOOK_SOURCE)) {
     if (!settings.hooks) settings.hooks = {};
     if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = [];
 
     const hookCommand = HOOK_SOURCE;
-    const alreadyInstalled = settings.hooks.PreToolUse.some((entry) =>
+    const existingIdx = settings.hooks.PreToolUse.findIndex((entry) =>
       entry.hooks &&
       entry.hooks.some((h) => h.command && h.command.includes("permission-hook.sh"))
     );
 
-    if (!alreadyInstalled) {
-      settings.hooks.PreToolUse.push({
-        matcher: "",
-        hooks: [
-          {
-            type: "command",
-            command: hookCommand,
-            timeout: 300,
-          },
-        ],
-      });
+    const hookEntry = {
+      matcher: "",
+      hooks: [
+        {
+          type: "command",
+          command: hookCommand,
+          timeout: 300,
+        },
+      ],
+    };
+
+    if (existingIdx >= 0) {
+      // Update the path in case it points to a stale installation
+      settings.hooks.PreToolUse[existingIdx] = hookEntry;
+    } else {
+      settings.hooks.PreToolUse.push(hookEntry);
     }
   }
 
@@ -170,8 +190,8 @@ function install() {
     console.log("Installed permission hook (PreToolUse → dashboard)");
   }
   console.log("");
-  if (serverEntry) {
-    console.log("  MCP server: " + serverEntry);
+  if (globalBin) {
+    console.log("  MCP server: crosschat serve (global binary)");
   } else {
     console.log("  MCP server: via npx @studiomopoke/crosschat serve");
   }
