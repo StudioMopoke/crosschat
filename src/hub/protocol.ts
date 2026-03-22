@@ -111,6 +111,7 @@ export interface TaskCreateMessage {
 
 export interface TaskClaimMessage {
   type: 'task.claim';
+  requestId?: string;
   taskId: string;
 }
 
@@ -230,9 +231,11 @@ export interface TaskCreatedMessage {
 
 export interface TaskClaimedMessage {
   type: 'task.claimed';
+  requestId?: string;
   taskId: string;
   claimantId: string;
   claimantName: string;
+  context?: string;
 }
 
 export interface TaskClaimAcceptedMessage {

@@ -244,9 +244,24 @@ export class AgentConnection {
     });
   }
 
-  /** Bid on an open task. */
-  claimTask(taskId: string): void {
-    this.send({ type: 'task.claim', taskId });
+  /** Bid on an open task. Returns context on success, rejects if already claimed. */
+  claimTask(taskId: string): Promise<{ taskId: string; context?: string }> {
+    const requestId = generateId();
+    this.send({ type: 'task.claim', requestId, taskId });
+
+    return new Promise<{ taskId: string; context?: string }>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(requestId);
+        reject(new Error('claimTask request timed out'));
+      }, 10_000);
+      timer.unref();
+
+      this.pendingRequests.set(requestId, {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        timer,
+      });
+    });
   }
 
   /** List tasks with optional filters. Returns a Promise. */
@@ -479,7 +494,24 @@ export class AgentConnection {
         }
         break;
       }
-      case 'task.claimed':
+      case 'task.claimed': {
+        // If this is a response to our claimTask request, resolve the pending Promise
+        const claimed = msg as TaskClaimedMessage;
+        if (claimed.requestId) {
+          const pending = this.pendingRequests.get(claimed.requestId);
+          if (pending) {
+            clearTimeout(pending.timer);
+            this.pendingRequests.delete(claimed.requestId);
+            pending.resolve({ taskId: claimed.taskId, context: claimed.context });
+            break;  // Don't also fire task event callbacks for the direct response
+          }
+        }
+        // Notification about someone else's claim — fall through to task event callbacks
+        for (const cb of this.taskEventCallbacks) {
+          try { cb(msg as TaskEvent); } catch { /* swallow */ }
+        }
+        break;
+      }
       case 'task.claimAccepted':
       case 'task.updated':
       case 'task.completed':

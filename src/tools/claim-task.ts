@@ -5,19 +5,19 @@ import type { AgentConnection } from '../hub/agent-connection.js';
 export function registerClaimTask(server: McpServer, agentConnection: AgentConnection): void {
   server.tool(
     'claim_task',
-    'Claim an open task. The task creator will be notified of your bid and must accept it before you can start working.',
+    'Claim an open task. First-come-first-served — the hub rejects duplicate claims. On success, returns the task context (withheld until claim is accepted).',
     {
       taskId: z.string().describe('The ID of the task to claim (from list_tasks or a task announcement in the room)'),
     },
     async ({ taskId }) => {
       try {
-        await agentConnection.claimTask(taskId);
+        const result = await agentConnection.claimTask(taskId);
 
         return {
           content: [
             {
               type: 'text' as const,
-              text: JSON.stringify({ claimed: true, taskId }),
+              text: JSON.stringify({ claimed: true, taskId: result.taskId, context: result.context }),
             },
           ],
         };

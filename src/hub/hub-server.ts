@@ -16,6 +16,7 @@ import {
   type PeerInfo,
   type AgentStatus,
   type TaskNote,
+  type TaskSummary,
   encodeMessage,
   decodeMessage,
 } from './protocol.js';
@@ -297,14 +298,13 @@ export async function startHub(): Promise<void> {
     };
   }
 
-  function taskToSummary(task: Task) {
-    return {
+  function taskToSummary(task: Task, opts?: { includeContext?: boolean }): TaskSummary {
+    const summary: TaskSummary = {
       taskId: task.taskId,
       roomId: task.roomId,
       creatorId: task.creatorId,
       creatorName: task.creatorName,
       description: task.description,
-      context: task.context,
       filter: task.filter,
       status: task.status,
       claimantId: task.claimantId,
@@ -312,6 +312,10 @@ export async function startHub(): Promise<void> {
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
     };
+    if (opts?.includeContext !== false && task.context) {
+      summary.context = task.context;
+    }
+    return summary;
   }
 
   // ── Mention parsing ──────────────────────────────────────────
@@ -517,10 +521,11 @@ export async function startHub(): Promise<void> {
 
       activeDigestTasks.set(room.id, task.taskId);
 
-      // Broadcast task creation to agents and browsers in the room
-      const summary = taskToSummary(task);
-      broadcastToRoomAgents(room.id, { type: 'task.created', task: summary });
-      broadcastToRoomBrowsers(room.id, { type: 'task.created', task: summary });
+      // Broadcast task creation — agents see redacted, browsers see full
+      const fullSummary = taskToSummary(task);
+      const redactedSummary = taskToSummary(task, { includeContext: false });
+      broadcastToRoomAgents(room.id, { type: 'task.created', task: redactedSummary });
+      broadcastToRoomBrowsers(room.id, { type: 'task.created', task: fullSummary });
 
       log(`Digest task ${task.taskId} created for room ${room.id}`);
       postActivity(`Room "${room.name}" hit message cap — auto-digest initiated`);
@@ -750,16 +755,18 @@ export async function startHub(): Promise<void> {
         filter: msg.filter,
       });
 
-      const summary = taskToSummary(task);
+      const fullSummary = taskToSummary(task);
+      const redactedSummary = taskToSummary(task, { includeContext: false });
 
-      // If the creator sent a requestId, send a direct response so they get the taskId
+      // If the creator sent a requestId, send a direct response with full context
       if (msg.requestId) {
-        sendToWs(agent.ws, { type: 'task.created', requestId: msg.requestId, task: summary });
+        sendToWs(agent.ws, { type: 'task.created', requestId: msg.requestId, task: fullSummary });
       }
 
-      // Broadcast to all agents in the room (including creator) and browsers
-      broadcastToRoomAgents(agent.currentRoom, { type: 'task.created', task: summary });
-      broadcastToRoomBrowsers(agent.currentRoom, { type: 'task.created', task: summary });
+      // Broadcast to agents WITHOUT context (they must claim to see it)
+      broadcastToRoomAgents(agent.currentRoom, { type: 'task.created', task: redactedSummary });
+      // Browsers/dashboard see full context
+      broadcastToRoomBrowsers(agent.currentRoom, { type: 'task.created', task: fullSummary });
 
       const targetDesc = task.filter?.agentId ? ` -> ${task.filter.agentId}` : '';
       postActivity(`${agent.name} delegated task "${task.description}"${targetDesc}`);
@@ -783,20 +790,22 @@ export async function startHub(): Promise<void> {
         });
       }
 
-      // Also notify the claimant that the claim was registered
+      // Send confirmation to the claimant WITH context (they now own it)
       sendToWs(agent.ws, {
         type: 'task.claimed',
+        requestId: msg.requestId,
         taskId: task.taskId,
         claimantId: agent.peerId,
         claimantName: agent.name,
+        context: task.context,
       });
 
-      // Broadcast to dashboard
+      // Broadcast to dashboard (no context needed in dashboard broadcast)
       broadcastToAllBrowsers({ type: 'task.claimed', taskId: task.taskId, claimantId: agent.peerId, claimantName: agent.name });
 
       postActivity(`${agent.name} claimed task "${task.description}"`, 'chitchat');
     } catch (err) {
-      sendError(agent.ws, err instanceof Error ? err.message : 'Failed to claim task');
+      sendError(agent.ws, err instanceof Error ? err.message : 'Failed to claim task', msg.requestId);
     }
   }
 
@@ -1020,10 +1029,11 @@ export async function startHub(): Promise<void> {
 
       activeDigestTasks.set(room.id, task.taskId);
 
-      // Broadcast task creation
-      const summary = taskToSummary(task);
-      broadcastToRoomAgents(room.id, { type: 'task.created', task: summary });
-      broadcastToRoomBrowsers(room.id, { type: 'task.created', task: summary });
+      // Broadcast task creation — agents see redacted, browsers see full
+      const fullSummary = taskToSummary(task);
+      const redactedSummary = taskToSummary(task, { includeContext: false });
+      broadcastToRoomAgents(room.id, { type: 'task.created', task: redactedSummary });
+      broadcastToRoomBrowsers(room.id, { type: 'task.created', task: fullSummary });
 
       sendToWs(agent.ws, {
         type: 'digest.requested',
@@ -1047,7 +1057,9 @@ export async function startHub(): Promise<void> {
       sendError(agent.ws, `Task not found: ${msg.taskId}`, msg.requestId);
       return;
     }
-    const summary = taskToSummary(task);
+    // Only include context for participants (creator or claimant)
+    const isParticipant = task.creatorId === agent.peerId || task.claimantId === agent.peerId;
+    const summary = taskToSummary(task, { includeContext: isParticipant });
     sendToWs(agent.ws, {
       type: 'task.detail',
       requestId: msg.requestId,
@@ -1062,10 +1074,14 @@ export async function startHub(): Promise<void> {
     if (msg.assignedTo) filter.assignedTo = msg.assignedTo;
 
     const tasks = taskManager.list(Object.keys(filter).length > 0 ? filter : undefined);
+    // Only include context for tasks where the agent is creator or claimant
     sendToWs(agent.ws, {
       type: 'tasks',
       requestId: msg.requestId,
-      tasks: tasks.map(taskToSummary),
+      tasks: tasks.map((t) => {
+        const isParticipant = t.creatorId === agent.peerId || t.claimantId === agent.peerId;
+        return taskToSummary(t, { includeContext: isParticipant });
+      }),
     });
   }
 
@@ -1299,10 +1315,13 @@ export async function startHub(): Promise<void> {
         context: context || undefined,
         filter: filter || undefined,
       });
-      const summary = taskToSummary(task);
-      broadcastToRoomAgents(roomId, { type: 'task.created', task: summary });
-      broadcastToRoomBrowsers(roomId, { type: 'task.created', task: summary });
-      res.json(summary);
+      const fullSummary = taskToSummary(task);
+      const redactedSummary = taskToSummary(task, { includeContext: false });
+      // Agents see only description (must claim to get context)
+      broadcastToRoomAgents(roomId, { type: 'task.created', task: redactedSummary });
+      // Dashboard sees full context
+      broadcastToRoomBrowsers(roomId, { type: 'task.created', task: fullSummary });
+      res.json(fullSummary);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to create task';
       res.status(400).json({ error: message });
