@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { generateId } from './util/id.js';
@@ -14,6 +15,8 @@ import type { PeerMessage } from './types.js';
 import type { RoomMessageMessage } from './hub/protocol.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+const pkg = require('../package.json') as { version: string };
 
 const CROSSCHAT_DIR = path.join(os.homedir(), '.crosschat');
 const DASHBOARD_LOCK_FILE = path.join(CROSSCHAT_DIR, 'dashboard.lock');
@@ -28,6 +31,7 @@ const LOCK_POLL_TIMEOUT_MS = 5_000;
 interface DashboardLock {
   pid: number;
   port: number;
+  version?: string;
   startedAt: string;
 }
 
@@ -119,11 +123,28 @@ async function ensureHub(): Promise<DashboardLock> {
   // Check for an existing running hub
   const existingLock = await readDashboardLock();
   if (existingLock) {
-    log(`Hub already running on port ${existingLock.port} (pid ${existingLock.pid})`);
-    return existingLock;
+    // Version mismatch — restart the hub so it serves the current build
+    if (existingLock.version && existingLock.version !== pkg.version) {
+      log(
+        `Hub version mismatch: running v${existingLock.version}, we are v${pkg.version}. ` +
+        `Stopping old hub (pid ${existingLock.pid}) and spawning new one.`
+      );
+      try {
+        process.kill(existingLock.pid, 'SIGTERM');
+        // Give the old hub a moment to shut down and clean up its lock file
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      } catch {
+        // Process already gone — that's fine
+      }
+      // Remove stale lock if the old hub didn't clean it up
+      await fs.unlink(DASHBOARD_LOCK_FILE).catch(() => {});
+    } else {
+      log(`Hub already running on port ${existingLock.port} (pid ${existingLock.pid})`);
+      return existingLock;
+    }
   }
 
-  // No hub running — spawn one
+  // No hub running (or old version was stopped) — spawn one
   await spawnHub();
   const lock = await waitForHubLock();
   log(`Hub started on port ${lock.port} (pid ${lock.pid})`);
