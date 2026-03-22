@@ -12,7 +12,7 @@ export function registerWaitForMessages(server: McpServer, messageStore: Message
     'Wait for the next message in your current room. Blocks until a message arrives or timeout.',
     {
       timeoutMs: z.number().optional().describe('How long to wait in milliseconds (default: 30000, max: 600000). Returns a timeout result if no message arrives.'),
-      broadcastCooldownMs: z.number().optional().describe('Delay in ms before returning broadcast messages (not direct @mentions). Used to stagger responses across agents so earlier responders can be seen by later ones. Set this to a random value (0-3000) seeded at init time.'),
+      broadcastCooldownMs: z.number().optional().describe('Delay in ms before returning broadcast messages (not direct @mentions). Used to stagger responses across agents so earlier responders can be seen by later ones. Set this to a random value (0-500) seeded at init time.'),
     },
     async ({ timeoutMs, broadcastCooldownMs }) => {
       try {

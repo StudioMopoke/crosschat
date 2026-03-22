@@ -225,8 +225,23 @@ export class AgentConnection {
   }
 
   /** Create a task in the current room. */
-  createTask(description: string, context?: string, filter?: TaskFilter): void {
-    this.send({ type: 'task.create', description, context, filter });
+  createTask(description: string, context?: string, filter?: TaskFilter): Promise<TaskSummary> {
+    const requestId = generateId();
+    this.send({ type: 'task.create', requestId, description, context, filter });
+
+    return new Promise<TaskSummary>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(requestId);
+        reject(new Error('createTask request timed out'));
+      }, 10_000);
+      timer.unref();
+
+      this.pendingRequests.set(requestId, {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        timer,
+      });
+    });
   }
 
   /** Bid on an open task. */
@@ -446,7 +461,24 @@ export class AgentConnection {
         }
         break;
 
-      case 'task.created':
+      case 'task.created': {
+        // If this is a direct response to our createTask request, resolve the pending Promise
+        const created = msg as TaskCreatedMessage;
+        if (created.requestId) {
+          const pending = this.pendingRequests.get(created.requestId);
+          if (pending) {
+            clearTimeout(pending.timer);
+            this.pendingRequests.delete(created.requestId);
+            pending.resolve(created.task);
+            break;  // Don't also fire task event callbacks for the direct response
+          }
+        }
+        // Broadcast notification (no requestId) — fall through to task event callbacks
+        for (const cb of this.taskEventCallbacks) {
+          try { cb(msg as TaskEvent); } catch { /* swallow */ }
+        }
+        break;
+      }
       case 'task.claimed':
       case 'task.claimAccepted':
       case 'task.updated':

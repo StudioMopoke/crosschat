@@ -117,6 +117,19 @@ export async function shutdownHub() {
   return res.json();
 }
 
+export async function createTask(roomId, description, context, filter, creatorName) {
+  const res = await fetch(`${API_BASE}/tasks`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ roomId, description, context: context || undefined, filter: filter || undefined, creatorName }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || 'Failed to create task');
+  }
+  return res.json();
+}
+
 export async function archiveTask(taskId) {
   const res = await fetch(`${API_BASE}/tasks/${taskId}/archive`, {
     method: 'POST',

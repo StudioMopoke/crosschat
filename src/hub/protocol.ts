@@ -103,6 +103,7 @@ export interface AgentListPeersMessage {
 
 export interface TaskCreateMessage {
   type: 'task.create';
+  requestId?: string;
   description: string;
   context?: string;
   filter?: TaskFilter;
@@ -223,6 +224,7 @@ export interface RoomMessageMessage {
 
 export interface TaskCreatedMessage {
   type: 'task.created';
+  requestId?: string;
   task: TaskSummary;
 }
 

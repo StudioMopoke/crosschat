@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { fetchRooms, createRoom, fetchMessages, postMessage, fetchPeers, fetchTasks, fetchTask, archiveTask, fetchPermissions, decidePermission, fetchInstances, createInstance, deleteInstance, launchInstance, shutdownHub } from './api';
+import { fetchRooms, createRoom, fetchMessages, postMessage, fetchPeers, fetchTasks, fetchTask, createTask, archiveTask, fetchPermissions, decidePermission, fetchInstances, createInstance, deleteInstance, launchInstance, shutdownHub } from './api';
 import { useWebSocket } from './useWebSocket';
 import './App.css';
 
@@ -461,10 +461,21 @@ function TaskCard({ task, onExpand, expanded, onArchive }) {
 
 // ── Tasks Panel ─────────────────────────────────────────────────────
 
-function TasksPanel({ tasks, onTasksChange }) {
+function TasksPanel({ tasks, onTasksChange, peers, rooms, activeRoomId, username }) {
   const [statusFilter, setStatusFilter] = useState('all');
   const [expandedTaskId, setExpandedTaskId] = useState(null);
+  const [showForm, setShowForm] = useState(false);
+  const [newDesc, setNewDesc] = useState('');
+  const [newContext, setNewContext] = useState('');
+  const [targetAgent, setTargetAgent] = useState('');
+  const [targetRoom, setTargetRoom] = useState(activeRoomId || 'general');
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState(null);
   const loading = tasks.length === 0 && statusFilter === 'all';
+
+  useEffect(() => {
+    if (activeRoomId) setTargetRoom(activeRoomId);
+  }, [activeRoomId]);
 
   const handleArchive = async (taskId) => {
     try {
@@ -473,6 +484,26 @@ function TasksPanel({ tasks, onTasksChange }) {
       if (expandedTaskId === taskId) setExpandedTaskId(null);
     } catch (err) {
       console.error('Failed to archive task:', err);
+    }
+  };
+
+  const handleCreate = async (e) => {
+    e.preventDefault();
+    if (!newDesc.trim()) return;
+    setCreating(true);
+    setError(null);
+    try {
+      const filter = targetAgent ? { agentId: targetAgent } : undefined;
+      await createTask(targetRoom, newDesc.trim(), newContext.trim() || undefined, filter, username);
+      setNewDesc('');
+      setNewContext('');
+      setTargetAgent('');
+      setShowForm(false);
+      if (onTasksChange) onTasksChange();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -489,23 +520,85 @@ function TasksPanel({ tasks, onTasksChange }) {
 
   return (
     <main className="tasks-panel">
-      <div className="tasks-filters">
-        <button
-          className={`tasks-filter-btn ${statusFilter === 'all' ? 'active' : ''}`}
-          onClick={() => setStatusFilter('all')}
-        >
-          All ({tasks.filter((t) => t.status !== 'archived').length})
-        </button>
-        {STATUS_ORDER.map((s) => (
+      <div className="tasks-header">
+        <div className="tasks-filters">
           <button
-            key={s}
-            className={`tasks-filter-btn ${statusFilter === s ? 'active' : ''}`}
-            onClick={() => setStatusFilter(s)}
+            className={`tasks-filter-btn ${statusFilter === 'all' ? 'active' : ''}`}
+            onClick={() => setStatusFilter('all')}
           >
-            {STATUS_LABELS[s]} ({statusCounts[s] || 0})
+            All ({tasks.filter((t) => t.status !== 'archived').length})
           </button>
-        ))}
+          {STATUS_ORDER.map((s) => (
+            <button
+              key={s}
+              className={`tasks-filter-btn ${statusFilter === s ? 'active' : ''}`}
+              onClick={() => setStatusFilter(s)}
+            >
+              {STATUS_LABELS[s]} ({statusCounts[s] || 0})
+            </button>
+          ))}
+        </div>
+        <button
+          className="tasks-add-btn"
+          onClick={() => setShowForm(!showForm)}
+        >
+          {showForm ? 'Cancel' : '+ New Task'}
+        </button>
       </div>
+
+      {error && (
+        <div className="tasks-error" onClick={() => setError(null)}>
+          {error}
+        </div>
+      )}
+
+      {showForm && (
+        <form className="task-form" onSubmit={handleCreate}>
+          <textarea
+            autoFocus
+            value={newDesc}
+            onChange={(e) => setNewDesc(e.target.value)}
+            placeholder="Task description — what needs to be done..."
+            rows={2}
+            maxLength={500}
+            disabled={creating}
+          />
+          <textarea
+            value={newContext}
+            onChange={(e) => setNewContext(e.target.value)}
+            placeholder="Context (optional) — background, constraints, details..."
+            rows={2}
+            maxLength={2000}
+            disabled={creating}
+          />
+          <div className="task-form-row">
+            <select
+              value={targetRoom}
+              onChange={(e) => setTargetRoom(e.target.value)}
+              disabled={creating}
+            >
+              {rooms.map((r) => (
+                <option key={r.id} value={r.id}>#{r.name}</option>
+              ))}
+            </select>
+            <select
+              value={targetAgent}
+              onChange={(e) => setTargetAgent(e.target.value)}
+              disabled={creating}
+            >
+              <option value="">Any agent</option>
+              {peers.map((p) => (
+                <option key={p.peerId} value={p.peerId}>
+                  {p.name} ({p.status})
+                </option>
+              ))}
+            </select>
+            <button type="submit" disabled={!newDesc.trim() || creating}>
+              {creating ? 'Creating...' : 'Delegate Task'}
+            </button>
+          </div>
+        </form>
+      )}
 
       <div className="tasks-list">
         {loading && tasks.length === 0 && (
@@ -1018,7 +1111,14 @@ export default function App() {
             peers={peers}
           />
         ) : activeTab === 'tasks' ? (
-          <TasksPanel tasks={tasks} onTasksChange={() => fetchTasks().then(setTasks).catch(() => {})} />
+          <TasksPanel
+            tasks={tasks}
+            onTasksChange={() => fetchTasks().then(setTasks).catch(() => {})}
+            peers={peers}
+            rooms={rooms}
+            activeRoomId={activeRoomId}
+            username={username}
+          />
         ) : (
           <InstancesPanel peers={peers} />
         )}

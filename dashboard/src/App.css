@@ -675,13 +675,113 @@
   overflow: hidden;
 }
 
+.tasks-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  gap: 12px;
+}
+
 .tasks-filters {
   display: flex;
   gap: 4px;
-  padding: 12px 24px;
-  border-bottom: 1px solid var(--border);
   overflow-x: auto;
-  flex-shrink: 0;
+}
+
+.tasks-add-btn {
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-bright);
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.tasks-add-btn:hover {
+  background: var(--accent-hover);
+}
+
+.tasks-error {
+  padding: 8px 24px;
+  color: var(--error, #ff6b6b);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.task-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.task-form textarea {
+  padding: 10px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.task-form textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.task-form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.task-form-row select {
+  padding: 8px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  min-width: 0;
+  flex: 1;
+}
+
+.task-form-row select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.task-form-row button {
+  padding: 8px 18px;
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  color: var(--text-bright);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.task-form-row button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.task-form-row button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .tasks-filter-btn {

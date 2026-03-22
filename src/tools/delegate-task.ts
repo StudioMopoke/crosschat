@@ -17,13 +17,13 @@ export function registerDelegateTask(server: McpServer, agentConnection: AgentCo
     },
     async ({ description, context, filter }) => {
       try {
-        agentConnection.createTask(description, context, filter);
+        const task = await agentConnection.createTask(description, context, filter);
 
         return {
           content: [
             {
               type: 'text' as const,
-              text: JSON.stringify({ delegated: true, description }),
+              text: JSON.stringify({ delegated: true, taskId: task.taskId, description }),
             },
           ],
         };

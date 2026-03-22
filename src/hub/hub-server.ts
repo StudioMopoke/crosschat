@@ -716,11 +716,16 @@ export async function startHub(): Promise<void> {
 
       const summary = taskToSummary(task);
 
+      // If the creator sent a requestId, send a direct response so they get the taskId
+      if (msg.requestId) {
+        sendToWs(agent.ws, { type: 'task.created', requestId: msg.requestId, task: summary });
+      }
+
       // Broadcast to all agents in the room (including creator) and browsers
       broadcastToRoomAgents(agent.currentRoom, { type: 'task.created', task: summary });
       broadcastToRoomBrowsers(agent.currentRoom, { type: 'task.created', task: summary });
     } catch (err) {
-      sendError(agent.ws, err instanceof Error ? err.message : 'Failed to create task');
+      sendError(agent.ws, err instanceof Error ? err.message : 'Failed to create task', msg.requestId);
     }
   }
 
@@ -1228,6 +1233,31 @@ export async function startHub(): Promise<void> {
   });
 
   // ── REST: Tasks ────────────────────────────────────────────────
+
+  app.post('/api/tasks', async (req, res) => {
+    const { description, context, filter, roomId, creatorName } = req.body || {};
+    if (!description || !roomId) {
+      res.status(400).json({ error: 'description and roomId are required' });
+      return;
+    }
+    try {
+      const task = await taskManager.create({
+        roomId,
+        creatorId: 'dashboard-user',
+        creatorName: creatorName || 'Dashboard',
+        description,
+        context: context || undefined,
+        filter: filter || undefined,
+      });
+      const summary = taskToSummary(task);
+      broadcastToRoomAgents(roomId, { type: 'task.created', task: summary });
+      broadcastToRoomBrowsers(roomId, { type: 'task.created', task: summary });
+      res.json(summary);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to create task';
+      res.status(400).json({ error: message });
+    }
+  });
 
   app.get('/api/tasks', (req, res) => {
     const filter: { status?: any; roomId?: string; assignedTo?: string } = {};
