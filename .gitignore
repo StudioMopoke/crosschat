@@ -5,3 +5,13 @@ dist/
 *.d.ts
 !src/**/*.d.ts
 .DS_Store
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.log
+
+# Claude Code
+.claude/settings.local.json
