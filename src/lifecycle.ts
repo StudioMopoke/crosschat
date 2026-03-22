@@ -263,5 +263,16 @@ export async function startServer(): Promise<void> {
   process.on('SIGHUP', shutdown);
   process.stdin.on('end', shutdown);
 
+  // 9. Monitor parent process (Claude Code) — disconnect if it dies
+  const parentPid = process.ppid;
+  const parentCheckInterval = setInterval(() => {
+    if (!isProcessAlive(parentPid)) {
+      log(`Parent process (pid ${parentPid}) is no longer alive — shutting down`);
+      clearInterval(parentCheckInterval);
+      shutdown();
+    }
+  }, 5_000);
+  parentCheckInterval.unref();
+
   log(`CrossChat agent ready: ${peerName} (${peerId})`);
 }

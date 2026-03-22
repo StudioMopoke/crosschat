@@ -191,6 +191,31 @@
   cursor: not-allowed;
 }
 
+.sidebar-footer {
+  margin-top: auto;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.hub-shutdown-btn {
+  width: 100%;
+  padding: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.hub-shutdown-btn:hover {
+  color: var(--danger, #ff4757);
+  border-color: rgba(255, 71, 87, 0.4);
+  background: rgba(255, 71, 87, 0.08);
+}
+
 /* Peers Bar */
 .peers-bar {
   padding: 12px 16px;
@@ -915,9 +940,9 @@
   cursor: not-allowed;
 }
 
-/* ── Projects Panel ────────────────────────────────────────────────── */
+/* ── Instances Panel ────────────────────────────────────────────────── */
 
-.projects-panel {
+.instances-panel {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -925,7 +950,7 @@
   overflow: hidden;
 }
 
-.projects-header {
+.instances-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -934,13 +959,13 @@
   flex-shrink: 0;
 }
 
-.projects-title {
+.instances-title {
   font-size: 14px;
   font-weight: 600;
   color: var(--text-bright);
 }
 
-.projects-add-btn {
+.instances-add-btn {
   padding: 6px 14px;
   font-size: 12px;
   font-weight: 600;
@@ -952,12 +977,12 @@
   transition: all 0.15s;
 }
 
-.projects-add-btn:hover {
+.instances-add-btn:hover {
   background: rgba(99, 102, 241, 0.2);
   border-color: var(--accent);
 }
 
-.projects-error {
+.instances-error {
   padding: 8px 24px;
   font-size: 13px;
   color: var(--danger, #ff4757);
@@ -966,7 +991,7 @@
   cursor: pointer;
 }
 
-.project-form {
+.instance-form {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -975,7 +1000,7 @@
   background: var(--bg-secondary);
 }
 
-.project-form input {
+.instance-form input {
   padding: 10px 12px;
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
@@ -984,11 +1009,11 @@
   font-size: 13px;
 }
 
-.project-form input:focus {
+.instance-form input:focus {
   border-color: var(--accent);
 }
 
-.project-form button {
+.instance-form button {
   align-self: flex-start;
   padding: 8px 18px;
   background: var(--accent);
@@ -998,16 +1023,16 @@
   font-weight: 600;
 }
 
-.project-form button:hover:not(:disabled) {
+.instance-form button:hover:not(:disabled) {
   background: var(--accent-hover);
 }
 
-.project-form button:disabled {
+.instance-form button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
 
-.projects-list {
+.instances-list {
   flex: 1;
   overflow-y: auto;
   padding: 16px 24px;
@@ -1016,43 +1041,43 @@
   gap: 8px;
 }
 
-.projects-empty {
+.instances-empty {
   color: var(--text-muted);
   text-align: center;
   padding: 40px 0;
   font-size: 14px;
 }
 
-/* Project Card */
-.project-card {
+/* Instance Card */
+.instance-card {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: 8px;
   transition: border-color 0.15s;
 }
 
-.project-card:hover {
+.instance-card:hover {
   border-color: var(--text-muted);
 }
 
-.project-card-header {
+.instance-card-header {
   padding: 14px 16px 10px;
 }
 
-.project-card-top {
+.instance-card-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-bottom: 4px;
 }
 
-.project-card-name {
+.instance-card-name {
   font-size: 14px;
   font-weight: 600;
   color: var(--text-bright);
 }
 
-.project-active-indicator {
+.instance-active-indicator {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -1061,14 +1086,14 @@
   color: var(--success, #22c55e);
 }
 
-.project-active-dot {
+.instance-active-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--success, #22c55e);
 }
 
-.project-card-path {
+.instance-card-path {
   font-size: 12px;
   font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
   color: var(--text-muted);
@@ -1078,19 +1103,19 @@
   margin-bottom: 4px;
 }
 
-.project-card-description {
+.instance-card-description {
   font-size: 13px;
   color: var(--text);
   line-height: 1.4;
 }
 
-.project-card-actions {
+.instance-card-actions {
   display: flex;
   gap: 8px;
   padding: 0 16px 12px;
 }
 
-.project-launch-btn {
+.instance-launch-btn {
   padding: 6px 16px;
   font-size: 12px;
   font-weight: 600;
@@ -1102,16 +1127,16 @@
   transition: all 0.15s;
 }
 
-.project-launch-btn:hover:not(:disabled) {
+.instance-launch-btn:hover:not(:disabled) {
   background: var(--accent-hover);
 }
 
-.project-launch-btn:disabled {
+.instance-launch-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.project-remove-btn {
+.instance-remove-btn {
   padding: 6px 12px;
   font-size: 12px;
   font-weight: 500;
@@ -1123,13 +1148,13 @@
   transition: all 0.15s;
 }
 
-.project-remove-btn:hover:not(:disabled) {
+.instance-remove-btn:hover:not(:disabled) {
   color: var(--danger, #ff4757);
   border-color: rgba(255, 71, 87, 0.4);
   background: rgba(255, 71, 87, 0.08);
 }
 
-.project-remove-btn:disabled {
+.instance-remove-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }

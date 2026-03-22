@@ -155,6 +155,12 @@ export interface AgentClearSessionMessage {
   tasks?: boolean;      // archive completed/failed tasks (default false)
 }
 
+export interface AgentRequestDigestMessage {
+  type: 'agent.requestDigest';
+  requestId: string;
+  clearMessages?: boolean;  // clear room messages after capturing for digest (default false)
+}
+
 export type AgentMessage =
   | AgentRegisterMessage
   | AgentHeartbeatMessage
@@ -171,7 +177,8 @@ export type AgentMessage =
   | TaskCompleteMessage
   | AgentGetTaskMessage
   | AgentListTasksMessage
-  | AgentClearSessionMessage;
+  | AgentClearSessionMessage
+  | AgentRequestDigestMessage;
 
 // ─── Server-to-agent messages ────────────────────────────────────
 
@@ -264,6 +271,14 @@ export interface SessionClearedMessage {
   tasksArchived: number;
 }
 
+export interface DigestRequestedMessage {
+  type: 'digest.requested';
+  requestId: string;
+  taskId: string;
+  messageCount: number;
+  messagesCleared: boolean;
+}
+
 export interface ErrorMessage {
   type: 'error';
   message: string;
@@ -284,6 +299,7 @@ export type ServerMessage =
   | TaskDetailMessage
   | TasksMessage
   | SessionClearedMessage
+  | DigestRequestedMessage
   | ErrorMessage;
 
 // ─── Helpers ─────────────────────────────────────────────────────

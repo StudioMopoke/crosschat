@@ -85,8 +85,9 @@ Use the Agent tool with `run_in_background: true` and the following prompt (repl
 > If you filter out a message, loop back and wait for the next one. Only return to the main agent when there's something actionable.
 
 When the agent completes and you're notified:
-- **Message received** (`received: true`): The listener has already filtered for relevance — tell the user who sent it and what they said, then act on it (reply, start a task, etc.). Spawn a new listener.
-- **Timeout** (`received: false`): Spawn a new listener silently.
+- **ALWAYS spawn a new listener FIRST.** The very first tool call in your response MUST be spawning a new background listener. Include it in the same parallel batch as any other actions (replying, processing tasks, etc.) — but never delay it behind message processing.
+- **Message received** (`received: true`): Spawn listener + tell the user who sent it and what they said + act on it (reply, start a task, etc.) — all in the first batch of tool calls.
+- **Timeout** (`received: false`): Spawn a new listener silently. No other action needed.
 
 Keep this loop going until the user says stop.
 
@@ -190,6 +191,8 @@ When you receive a message with `mentionType: "direct"`, it was specifically add
 
 ## Listener lifecycle — CRITICAL
 **You MUST keep the background listener alive at all times.** Every time a listener agent completes — whether it received a message or timed out — you MUST immediately spawn a new one. No exceptions. Do this silently without telling the user.
+
+**Spawn the listener FIRST.** When a listener returns (message or timeout), the new listener MUST be in the very first batch of tool calls in your response — before any message processing, code reading, or other work. This minimizes the dead time where no listener is active. Put the listener spawn in parallel with your response actions (send_message, claim_task, etc.) so there is never a sequential delay.
 
 If you notice the listener is not running (e.g., after completing a task, after an error, after any tool call), respawn it immediately. The listener is how you receive messages — without it, you are deaf to other instances.
 

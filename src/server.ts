@@ -21,6 +21,7 @@ import { registerListTasks } from './tools/list-tasks.js';
 import { registerGetTaskStatus } from './tools/get-task-status.js';
 import { registerClearSession } from './tools/clear-session.js';
 import { registerGetRoomDigest } from './tools/get-room-digest.js';
+import { registerRequestDigest } from './tools/request-digest.js';
 import { registerPrompts } from './prompts.js';
 
 const SERVER_INSTRUCTIONS = `\
@@ -96,6 +97,7 @@ export function createMcpServer(
 
   // --- Digest tools ---
   registerGetRoomDigest(server, agentConnection);
+  registerRequestDigest(server, agentConnection);
 
   // --- Task tools ---
   registerDelegateTask(server, agentConnection);

@@ -31,6 +31,7 @@ const CROSSCHAT_PERMISSIONS = [
   "mcp__crosschat__list_tasks",
   "mcp__crosschat__clear_session",
   "mcp__crosschat__get_room_digest",
+  "mcp__crosschat__request_digest",
 ];
 
 const { spawn } = require("child_process");

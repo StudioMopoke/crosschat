@@ -30,11 +30,12 @@ const pkg = require('../../package.json') as { version: string };
 const CROSSCHAT_DIR = path.join(os.homedir(), '.crosschat');
 const DIGESTS_DIR = path.join(CROSSCHAT_DIR, 'digests');
 const DASHBOARD_LOCK_FILE = path.join(CROSSCHAT_DIR, 'dashboard.lock');
-const PROJECTS_FILE = path.join(CROSSCHAT_DIR, 'projects.json');
+const INSTANCES_FILE = path.join(CROSSCHAT_DIR, 'instances.json');
 const REGISTER_TIMEOUT_MS = 5_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const PONG_TIMEOUT_MS = 10_000;
 const ROOM_MESSAGE_CAP = 200;
+const IDLE_SHUTDOWN_MS = 5 * 60 * 1000; // 5 minutes with no agents → auto-shutdown
 const PERMISSION_TTL_MS = 10 * 60 * 1000;  // 10 minutes for pending permissions
 const PERMISSION_SWEEP_INTERVAL_MS = 60_000;
 const WS_MAX_PAYLOAD = 1 * 1024 * 1024;  // 1MB
@@ -48,7 +49,7 @@ interface DashboardLock {
   startedAt: string;
 }
 
-interface Project {
+interface Instance {
   id: string;
   name: string;
   path: string;
@@ -148,23 +149,23 @@ async function removeDashboardLock(): Promise<void> {
   }
 }
 
-// ── Project store helpers ────────────────────────────────────────────
+// ── Instance store helpers ────────────────────────────────────────────
 
-async function loadProjects(): Promise<Map<string, Project>> {
+async function loadInstances(): Promise<Map<string, Instance>> {
   try {
-    const data = await fs.readFile(PROJECTS_FILE, 'utf-8');
-    const list = JSON.parse(data) as Project[];
+    const data = await fs.readFile(INSTANCES_FILE, 'utf-8');
+    const list = JSON.parse(data) as Instance[];
     return new Map(list.map((p) => [p.id, p]));
   } catch {
     return new Map();
   }
 }
 
-async function persistProjects(projects: Map<string, Project>): Promise<void> {
-  const list = [...projects.values()];
-  const tmpPath = `${PROJECTS_FILE}.tmp`;
+async function persistInstances(instances: Map<string, Instance>): Promise<void> {
+  const list = [...instances.values()];
+  const tmpPath = `${INSTANCES_FILE}.tmp`;
   await fs.writeFile(tmpPath, JSON.stringify(list, null, 2), 'utf-8');
-  await fs.rename(tmpPath, PROJECTS_FILE);
+  await fs.rename(tmpPath, INSTANCES_FILE);
 }
 
 // ── Version from package.json ────────────────────────────────────────
@@ -200,7 +201,7 @@ export async function startHub(): Promise<void> {
   const browserTokens = new Map<WebSocket, string>();   // session tokens for permission decisions
   const validTokens = new Set<string>();                 // fast lookup for REST auth
   const pendingPermissions = new Map<string, PendingPermission>();
-  const projects = await loadProjects();
+  const instances = await loadInstances();
 
   // Initialize TaskManager
   const taskManager = new TaskManager();
@@ -208,6 +209,9 @@ export async function startHub(): Promise<void> {
 
   // Digest tracking: roomId -> taskId of currently active digest task
   const activeDigestTasks = new Map<string, string>();
+
+  // Idle shutdown: auto-shutdown when no agents are connected for IDLE_SHUTDOWN_MS
+  let idleShutdownTimer: NodeJS.Timeout | null = null;
 
   // Ensure digests directory exists
   await fs.mkdir(DIGESTS_DIR, { recursive: true });
@@ -238,14 +242,14 @@ export async function startHub(): Promise<void> {
     sendToWs(ws, { type: 'error', message, requestId });
   }
 
-  async function autoRegisterProject(cwd: string): Promise<void> {
+  async function autoRegisterInstance(cwd: string): Promise<void> {
     const resolvedPath = path.resolve(cwd);
 
-    // Skip if path has unsafe characters (same check as POST /api/projects)
+    // Skip if path has unsafe characters (same check as POST /api/instances)
     if (!/^[a-zA-Z0-9\s/\-_\.~]+$/.test(resolvedPath)) return;
 
-    // Skip if a project with this path already exists
-    for (const existing of projects.values()) {
+    // Skip if an instance with this path already exists
+    for (const existing of instances.values()) {
       if (existing.path === resolvedPath) return;
     }
 
@@ -258,15 +262,15 @@ export async function startHub(): Promise<void> {
     }
 
     const dirName = resolvedPath.split('/').filter(Boolean).pop() || 'unknown';
-    const project: Project = {
+    const instance: Instance = {
       id: generateId(),
       name: dirName,
       path: resolvedPath,
       createdAt: new Date().toISOString(),
     };
-    projects.set(project.id, project);
-    await persistProjects(projects);
-    log(`Auto-registered project: ${project.name} (${project.path})`);
+    instances.set(instance.id, instance);
+    await persistInstances(instances);
+    log(`Auto-registered instance: ${instance.name} (${instance.path})`);
   }
 
   function findAgentByWs(ws: WebSocket): ConnectedAgent | undefined {
@@ -580,6 +584,17 @@ export async function startHub(): Promise<void> {
     agents.delete(peerId);
     log(`Agent disconnected: ${agent.name} (${peerId})`);
     broadcastToAllBrowsers({ type: 'peerDisconnected', peerId, name: agent.name });
+
+    // Start idle shutdown timer if no agents remain
+    if (agents.size === 0 && !idleShutdownTimer) {
+      log(`No agents connected — hub will auto-shutdown in ${IDLE_SHUTDOWN_MS / 1000}s`);
+      idleShutdownTimer = setTimeout(() => {
+        if (agents.size === 0) {
+          shutdown('idle (no agents for 5 minutes)');
+        }
+      }, IDLE_SHUTDOWN_MS);
+      idleShutdownTimer.unref();
+    }
   }
 
   // ── Agent message handlers ────────────────────────────────────
@@ -893,6 +908,84 @@ export async function startHub(): Promise<void> {
     log(`Session cleared by ${agent.name}: ${messagesCleared} message(s), ${tasksArchived} task(s) archived`);
   }
 
+  async function handleRequestDigest(
+    agent: ConnectedAgent,
+    msg: AgentMessage & { type: 'agent.requestDigest' },
+  ): Promise<void> {
+    const room = rooms.get(agent.currentRoom);
+    if (!room || room.messages.length === 0) {
+      sendError(agent.ws, 'No messages in room to digest', msg.requestId);
+      return;
+    }
+
+    // Check if a digest task is already active for this room
+    const existingTaskId = activeDigestTasks.get(agent.currentRoom);
+    if (existingTaskId) {
+      const existingTask = taskManager.get(existingTaskId);
+      if (existingTask && (existingTask.status === 'open' || existingTask.status === 'claimed' || existingTask.status === 'in_progress')) {
+        sendError(agent.ws, `A digest task is already in progress for this room (task ${existingTaskId})`, msg.requestId);
+        return;
+      }
+      activeDigestTasks.delete(agent.currentRoom);
+    }
+
+    // Capture current messages and write to pending digest file
+    const messagesToDigest = [...room.messages];
+    const pendingPath = path.join(DIGESTS_DIR, `${room.id}.jsonl`);
+    const lines = messagesToDigest.map((m) => JSON.stringify(m)).join('\n') + '\n';
+    await fs.appendFile(pendingPath, lines, 'utf-8');
+
+    // Optionally clear room messages
+    const clearMessages = msg.clearMessages === true;
+    if (clearMessages) {
+      room.messages = [];
+      broadcastToRoomBrowsers(agent.currentRoom, {
+        type: 'sessionCleared',
+        roomId: agent.currentRoom,
+        clearedBy: agent.name,
+        messagesCleared: messagesToDigest.length,
+      });
+    }
+
+    // Create digest task
+    let pendingContent: string;
+    try {
+      pendingContent = await fs.readFile(pendingPath, 'utf-8');
+    } catch {
+      pendingContent = lines;
+    }
+
+    try {
+      const task = await taskManager.create({
+        roomId: room.id,
+        creatorId: agent.peerId,
+        creatorName: agent.name,
+        description: 'Summarize the following room messages into a digest',
+        context: pendingContent,
+      });
+
+      activeDigestTasks.set(room.id, task.taskId);
+
+      // Broadcast task creation
+      const summary = taskToSummary(task);
+      broadcastToRoomAgents(room.id, { type: 'task.created', task: summary });
+      broadcastToRoomBrowsers(room.id, { type: 'task.created', task: summary });
+
+      sendToWs(agent.ws, {
+        type: 'digest.requested',
+        requestId: msg.requestId,
+        taskId: task.taskId,
+        messageCount: messagesToDigest.length,
+        messagesCleared: clearMessages,
+      });
+
+      log(`Digest requested by ${agent.name} for room ${room.id}: ${messagesToDigest.length} message(s), task ${task.taskId}`);
+    } catch (err) {
+      logError(`Failed to create digest task for room ${room.id}`, err);
+      sendError(agent.ws, 'Failed to create digest task', msg.requestId);
+    }
+  }
+
   function handleGetTask(agent: ConnectedAgent, msg: AgentMessage & { type: 'agent.getTask' }): void {
     const task = taskManager.get(msg.taskId);
     if (!task) {
@@ -981,6 +1074,9 @@ export async function startHub(): Promise<void> {
         break;
       case 'agent.clearSession':
         await handleClearSession(agent, msg);
+        break;
+      case 'agent.requestDigest':
+        await handleRequestDigest(agent, msg);
         break;
       default:
         sendError(ws, `Unknown message type: ${(msg as any).type}`);
@@ -1284,11 +1380,11 @@ export async function startHub(): Promise<void> {
     setTimeout(() => pendingPermissions.delete(permission.id), 60_000);
   });
 
-  // ── REST: Projects ──────────────────────────────────────────────
+  // ── REST: Instances ──────────────────────────────────────────────
 
-  app.get('/api/projects', (_req, res) => {
-    const list = [...projects.values()].map((p) => {
-      // Count active agents whose cwd matches this project path
+  app.get('/api/instances', (_req, res) => {
+    const list = [...instances.values()].map((p) => {
+      // Count active agents whose cwd matches this instance path
       let activeAgents = 0;
       for (const agent of agents.values()) {
         if (agent.cwd === p.path) activeAgents++;
@@ -1299,18 +1395,18 @@ export async function startHub(): Promise<void> {
     res.json(list);
   });
 
-  app.post('/api/projects', async (req, res) => {
-    const { name, path: projPath, description } = req.body;
+  app.post('/api/instances', async (req, res) => {
+    const { name, path: instPath, description } = req.body;
     if (!name || typeof name !== 'string' || name.trim().length === 0) {
-      res.status(400).json({ error: 'Project name is required' });
+      res.status(400).json({ error: 'Instance name is required' });
       return;
     }
-    if (!projPath || typeof projPath !== 'string' || projPath.trim().length === 0) {
-      res.status(400).json({ error: 'Project path is required' });
+    if (!instPath || typeof instPath !== 'string' || instPath.trim().length === 0) {
+      res.status(400).json({ error: 'Instance path is required' });
       return;
     }
 
-    const resolvedPath = path.resolve(projPath.trim());
+    const resolvedPath = path.resolve(instPath.trim());
 
     // Validate path contains only safe characters (prevent shell injection in launch)
     if (!/^[a-zA-Z0-9\s/\-_\.~]+$/.test(resolvedPath)) {
@@ -1331,55 +1427,55 @@ export async function startHub(): Promise<void> {
     }
 
     // Check for duplicate path
-    for (const existing of projects.values()) {
+    for (const existing of instances.values()) {
       if (existing.path === resolvedPath) {
-        res.status(409).json({ error: 'A project with this path is already registered' });
+        res.status(409).json({ error: 'An instance with this path is already registered' });
         return;
       }
     }
 
-    const project: Project = {
+    const instance: Instance = {
       id: generateId(),
       name: name.trim(),
       path: resolvedPath,
       description: description?.trim() || undefined,
       createdAt: new Date().toISOString(),
     };
-    projects.set(project.id, project);
-    await persistProjects(projects);
+    instances.set(instance.id, instance);
+    await persistInstances(instances);
 
-    log(`Project registered: ${project.name} (${project.path})`);
-    res.status(201).json(project);
+    log(`Instance registered: ${instance.name} (${instance.path})`);
+    res.status(201).json(instance);
   });
 
-  app.delete('/api/projects/:id', async (req, res) => {
-    const project = projects.get(req.params.id);
-    if (!project) {
-      res.status(404).json({ error: 'Project not found' });
+  app.delete('/api/instances/:id', async (req, res) => {
+    const instance = instances.get(req.params.id);
+    if (!instance) {
+      res.status(404).json({ error: 'Instance not found' });
       return;
     }
-    projects.delete(req.params.id);
-    await persistProjects(projects);
-    log(`Project removed: ${project.name} (${project.path})`);
+    instances.delete(req.params.id);
+    await persistInstances(instances);
+    log(`Instance removed: ${instance.name} (${instance.path})`);
     res.json({ deleted: true });
   });
 
-  app.post('/api/projects/:id/launch', async (req, res) => {
-    const project = projects.get(req.params.id);
-    if (!project) {
-      res.status(404).json({ error: 'Project not found' });
+  app.post('/api/instances/:id/launch', async (req, res) => {
+    const instance = instances.get(req.params.id);
+    if (!instance) {
+      res.status(404).json({ error: 'Instance not found' });
       return;
     }
 
     // Re-validate directory
     try {
-      const stat = await fs.stat(project.path);
+      const stat = await fs.stat(instance.path);
       if (!stat.isDirectory()) {
-        res.status(400).json({ error: 'Project directory no longer exists' });
+        res.status(400).json({ error: 'Instance directory no longer exists' });
         return;
       }
     } catch {
-      res.status(400).json({ error: 'Project directory no longer exists' });
+      res.status(400).json({ error: 'Instance directory no longer exists' });
       return;
     }
 
@@ -1389,8 +1485,8 @@ export async function startHub(): Promise<void> {
     }
 
     // Escape path for AppleScript (replace backslashes and double-quotes)
-    const escapedPath = project.path.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    const agentName = `agent-${project.id.slice(0, 8)}`;
+    const escapedPath = instance.path.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const agentName = `agent-${instance.id.slice(0, 8)}`;
     const script = `tell application "Terminal"
   activate
   do script "cd \\"${escapedPath}\\" && CROSSCHAT_AGENT_NAME=${agentName} claude"
@@ -1398,8 +1494,16 @@ end tell`;
 
     spawn('osascript', ['-e', script], { detached: true, stdio: 'ignore' }).unref();
 
-    log(`Launched Claude Code in: ${project.path}`);
-    res.json({ launched: true, projectId: project.id, path: project.path });
+    log(`Launched Claude Code in: ${instance.path}`);
+    res.json({ launched: true, instanceId: instance.id, path: instance.path });
+  });
+
+  // ── REST: Hub control ──────────────────────────────────────────────
+
+  app.post('/api/hub/shutdown', (_req, res) => {
+    res.json({ shutting_down: true });
+    // Delay slightly so the response is sent before shutdown
+    setTimeout(() => shutdown('API request'), 100);
   });
 
   // ── API 404 — reject unmatched API routes before SPA fallback ──
@@ -1506,6 +1610,13 @@ end tell`;
 
           agents.set(msg.peerId, agent);
 
+          // Cancel idle shutdown — an agent is here
+          if (idleShutdownTimer) {
+            clearTimeout(idleShutdownTimer);
+            idleShutdownTimer = null;
+            log('Idle shutdown cancelled — agent connected');
+          }
+
           sendToWs(ws, {
             type: 'registered',
             peerId: msg.peerId,
@@ -1515,9 +1626,9 @@ end tell`;
           log(`Agent registered: ${agent.name} (${agent.peerId}), cwd=${agent.cwd}`);
           broadcastToAllBrowsers({ type: 'peerConnected', peer: buildPeerInfo(agent) });
 
-          // Auto-register agent's working directory as a project
-          autoRegisterProject(agent.cwd).catch((err) => {
-            logError('Auto-register project failed', err);
+          // Auto-register agent's working directory as an instance
+          autoRegisterInstance(agent.cwd).catch((err) => {
+            logError('Auto-register instance failed', err);
           });
         } catch (err) {
           sendError(ws, 'Invalid registration message');
@@ -1738,6 +1849,7 @@ end tell`;
     // Stop timers
     clearInterval(heartbeatInterval);
     clearInterval(permissionSweepInterval);
+    if (idleShutdownTimer) clearTimeout(idleShutdownTimer);
 
     // Close all agent WebSocket connections
     for (const agent of agents.values()) {

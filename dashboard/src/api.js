@@ -74,40 +74,46 @@ export async function decidePermission(id, decision, reason, sessionToken) {
   return res.json();
 }
 
-export async function fetchProjects() {
-  const res = await fetch(`${API_BASE}/projects`);
-  if (!res.ok) throw new Error('Failed to fetch projects');
+export async function fetchInstances() {
+  const res = await fetch(`${API_BASE}/instances`);
+  if (!res.ok) throw new Error('Failed to fetch instances');
   return res.json();
 }
 
-export async function createProject(name, projPath, description) {
-  const res = await fetch(`${API_BASE}/projects`, {
+export async function createInstance(name, instPath, description) {
+  const res = await fetch(`${API_BASE}/instances`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, path: projPath, description }),
+    body: JSON.stringify({ name, path: instPath, description }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || 'Failed to create project');
+    throw new Error(body.error || 'Failed to create instance');
   }
   return res.json();
 }
 
-export async function deleteProject(id) {
-  const res = await fetch(`${API_BASE}/projects/${id}`, { method: 'DELETE' });
+export async function deleteInstance(id) {
+  const res = await fetch(`${API_BASE}/instances/${id}`, { method: 'DELETE' });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || 'Failed to delete project');
+    throw new Error(body.error || 'Failed to delete instance');
   }
   return res.json();
 }
 
-export async function launchProject(id) {
-  const res = await fetch(`${API_BASE}/projects/${id}/launch`, { method: 'POST' });
+export async function launchInstance(id) {
+  const res = await fetch(`${API_BASE}/instances/${id}/launch`, { method: 'POST' });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || 'Failed to launch project');
+    throw new Error(body.error || 'Failed to launch instance');
   }
+  return res.json();
+}
+
+export async function shutdownHub() {
+  const res = await fetch(`${API_BASE}/hub/shutdown`, { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to shutdown hub');
   return res.json();
 }
 

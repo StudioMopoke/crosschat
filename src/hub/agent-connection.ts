@@ -315,6 +315,29 @@ export class AgentConnection {
     });
   }
 
+  requestDigest(opts?: { clearMessages?: boolean }): Promise<{ taskId: string; messageCount: number; messagesCleared: boolean }> {
+    const requestId = generateId();
+    this.send({
+      type: 'agent.requestDigest',
+      requestId,
+      clearMessages: opts?.clearMessages,
+    });
+
+    return new Promise<{ taskId: string; messageCount: number; messagesCleared: boolean }>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(requestId);
+        reject(new Error('requestDigest request timed out'));
+      }, 10_000);
+      timer.unref();
+
+      this.pendingRequests.set(requestId, {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        timer,
+      });
+    });
+  }
+
   // ─── Event registration ────────────────────────────────────────
 
   /** Register a callback invoked for every incoming room message. */
@@ -394,6 +417,16 @@ export class AgentConnection {
           this.pendingRequests.delete(msg.requestId);
           const cleared = msg as SessionClearedMessage;
           pending.resolve({ messagesCleared: cleared.messagesCleared, tasksArchived: cleared.tasksArchived });
+        }
+        break;
+      }
+
+      case 'digest.requested': {
+        const pending = this.pendingRequests.get(msg.requestId);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pendingRequests.delete(msg.requestId);
+          pending.resolve({ taskId: msg.taskId, messageCount: msg.messageCount, messagesCleared: msg.messagesCleared });
         }
         break;
       }

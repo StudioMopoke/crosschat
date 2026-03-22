@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { fetchRooms, createRoom, fetchMessages, postMessage, fetchPeers, fetchTasks, fetchTask, archiveTask, fetchPermissions, decidePermission, fetchProjects, createProject, deleteProject, launchProject } from './api';
+import { fetchRooms, createRoom, fetchMessages, postMessage, fetchPeers, fetchTasks, fetchTask, archiveTask, fetchPermissions, decidePermission, fetchInstances, createInstance, deleteInstance, launchInstance, shutdownHub } from './api';
 import { useWebSocket } from './useWebSocket';
 import './App.css';
 
@@ -150,6 +150,18 @@ function Sidebar({ rooms, activeRoomId, onSelectRoom, onCreateRoom, peers, onMen
         />
         <button type="submit" disabled={!newRoomName.trim() || creating}>+</button>
       </form>
+      <div className="sidebar-footer">
+        <button
+          className="hub-shutdown-btn"
+          onClick={() => {
+            if (window.confirm('Shut down the CrossChat hub? All agents will be disconnected.')) {
+              shutdownHub().catch(() => {});
+            }
+          }}
+        >
+          Shutdown Hub
+        </button>
+      </div>
     </aside>
   );
 }
@@ -516,16 +528,16 @@ function TasksPanel({ tasks, onTasksChange }) {
   );
 }
 
-// ── Projects Panel ───────────────────────────────────────────────────
+// ── Instances Panel ───────────────────────────────────────────────────
 
-function ProjectCard({ project, onLaunch, onRemove }) {
+function InstanceCard({ instance, onLaunch, onRemove }) {
   const [launching, setLaunching] = useState(false);
   const [removing, setRemoving] = useState(false);
 
   const handleLaunch = async () => {
     setLaunching(true);
     try {
-      await onLaunch(project.id);
+      await onLaunch(instance.id);
     } finally {
       setTimeout(() => setLaunching(false), 2000);
     }
@@ -534,43 +546,43 @@ function ProjectCard({ project, onLaunch, onRemove }) {
   const handleRemove = async () => {
     setRemoving(true);
     try {
-      await onRemove(project.id);
+      await onRemove(instance.id);
     } finally {
       setRemoving(false);
     }
   };
 
-  const dirName = project.path.split('/').filter(Boolean).pop() || project.path;
+  const dirName = instance.path.split('/').filter(Boolean).pop() || instance.path;
 
   return (
-    <div className="project-card">
-      <div className="project-card-header">
-        <div className="project-card-top">
-          <span className="project-card-name">{project.name}</span>
-          {project.activeAgents > 0 && (
-            <span className="project-active-indicator">
-              <span className="project-active-dot" />
-              {project.activeAgents} agent{project.activeAgents !== 1 ? 's' : ''}
+    <div className="instance-card">
+      <div className="instance-card-header">
+        <div className="instance-card-top">
+          <span className="instance-card-name">{instance.name}</span>
+          {instance.activeAgents > 0 && (
+            <span className="instance-active-indicator">
+              <span className="instance-active-dot" />
+              {instance.activeAgents} agent{instance.activeAgents !== 1 ? 's' : ''}
             </span>
           )}
         </div>
-        <div className="project-card-path" title={project.path}>
-          {project.path}
+        <div className="instance-card-path" title={instance.path}>
+          {instance.path}
         </div>
-        {project.description && (
-          <div className="project-card-description">{project.description}</div>
+        {instance.description && (
+          <div className="instance-card-description">{instance.description}</div>
         )}
       </div>
-      <div className="project-card-actions">
+      <div className="instance-card-actions">
         <button
-          className="project-launch-btn"
+          className="instance-launch-btn"
           onClick={handleLaunch}
           disabled={launching}
         >
           {launching ? 'Launching...' : 'Launch'}
         </button>
         <button
-          className="project-remove-btn"
+          className="instance-remove-btn"
           onClick={handleRemove}
           disabled={removing}
         >
@@ -581,8 +593,8 @@ function ProjectCard({ project, onLaunch, onRemove }) {
   );
 }
 
-function ProjectsPanel({ peers }) {
-  const [projects, setProjects] = useState([]);
+function InstancesPanel({ peers }) {
+  const [instances, setInstances] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [newName, setNewName] = useState('');
@@ -591,17 +603,17 @@ function ProjectsPanel({ peers }) {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState(null);
 
-  const loadProjects = useCallback(() => {
-    fetchProjects()
-      .then((data) => { setProjects(data); setLoading(false); })
+  const loadInstances = useCallback(() => {
+    fetchInstances()
+      .then((data) => { setInstances(data); setLoading(false); })
       .catch(() => setLoading(false));
   }, []);
 
   useEffect(() => {
-    loadProjects();
-    const interval = setInterval(loadProjects, 10000);
+    loadInstances();
+    const interval = setInterval(loadInstances, 10000);
     return () => clearInterval(interval);
-  }, [loadProjects]);
+  }, [loadInstances]);
 
   const handleCreate = async (e) => {
     e.preventDefault();
@@ -609,12 +621,12 @@ function ProjectsPanel({ peers }) {
     setCreating(true);
     setError(null);
     try {
-      await createProject(newName.trim(), newPath.trim(), newDesc.trim() || undefined);
+      await createInstance(newName.trim(), newPath.trim(), newDesc.trim() || undefined);
       setNewName('');
       setNewPath('');
       setNewDesc('');
       setShowForm(false);
-      loadProjects();
+      loadInstances();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -624,7 +636,7 @@ function ProjectsPanel({ peers }) {
 
   const handleLaunch = async (id) => {
     try {
-      await launchProject(id);
+      await launchInstance(id);
     } catch (err) {
       setError(err.message);
     }
@@ -632,19 +644,19 @@ function ProjectsPanel({ peers }) {
 
   const handleRemove = async (id) => {
     try {
-      await deleteProject(id);
-      loadProjects();
+      await deleteInstance(id);
+      loadInstances();
     } catch (err) {
       setError(err.message);
     }
   };
 
   return (
-    <main className="projects-panel">
-      <div className="projects-header">
-        <span className="projects-title">Registered Projects</span>
+    <main className="instances-panel">
+      <div className="instances-header">
+        <span className="instances-title">Registered Instances</span>
         <button
-          className="projects-add-btn"
+          className="instances-add-btn"
           onClick={() => setShowForm(!showForm)}
         >
           {showForm ? 'Cancel' : '+ Register'}
@@ -652,18 +664,18 @@ function ProjectsPanel({ peers }) {
       </div>
 
       {error && (
-        <div className="projects-error" onClick={() => setError(null)}>
+        <div className="instances-error" onClick={() => setError(null)}>
           {error}
         </div>
       )}
 
       {showForm && (
-        <form className="project-form" onSubmit={handleCreate}>
+        <form className="instance-form" onSubmit={handleCreate}>
           <input
             autoFocus
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
-            placeholder="Project name..."
+            placeholder="Instance name..."
             maxLength={60}
             disabled={creating}
           />
@@ -681,22 +693,22 @@ function ProjectsPanel({ peers }) {
             disabled={creating}
           />
           <button type="submit" disabled={!newName.trim() || !newPath.trim() || creating}>
-            {creating ? 'Registering...' : 'Register Project'}
+            {creating ? 'Registering...' : 'Register Instance'}
           </button>
         </form>
       )}
 
-      <div className="projects-list">
-        {loading && projects.length === 0 && (
-          <div className="projects-empty">Loading projects...</div>
+      <div className="instances-list">
+        {loading && instances.length === 0 && (
+          <div className="instances-empty">Loading instances...</div>
         )}
-        {!loading && projects.length === 0 && !showForm && (
-          <div className="projects-empty">No projects registered yet. Click + Register to add one.</div>
+        {!loading && instances.length === 0 && !showForm && (
+          <div className="instances-empty">No instances registered yet. Click + Register to add one.</div>
         )}
-        {projects.map((project) => (
-          <ProjectCard
-            key={project.id}
-            project={project}
+        {instances.map((instance) => (
+          <InstanceCard
+            key={instance.id}
+            instance={instance}
             onLaunch={handleLaunch}
             onRemove={handleRemove}
           />
@@ -986,10 +998,10 @@ export default function App() {
               Tasks
             </button>
             <button
-              className={`tab-item ${activeTab === 'projects' ? 'active' : ''}`}
-              onClick={() => setActiveTab('projects')}
+              className={`tab-item ${activeTab === 'instances' ? 'active' : ''}`}
+              onClick={() => setActiveTab('instances')}
             >
-              Projects
+              Instances
             </button>
           </div>
         </div>
@@ -1008,7 +1020,7 @@ export default function App() {
         ) : activeTab === 'tasks' ? (
           <TasksPanel tasks={tasks} onTasksChange={() => fetchTasks().then(setTasks).catch(() => {})} />
         ) : (
-          <ProjectsPanel peers={peers} />
+          <InstancesPanel peers={peers} />
         )}
       </div>
     </div>
