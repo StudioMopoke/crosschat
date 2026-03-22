@@ -59,6 +59,7 @@ export interface AgentRegisterMessage {
   name: string;
   cwd: string;
   pid: number;
+  parentPid?: number;
 }
 
 export interface AgentHeartbeatMessage {

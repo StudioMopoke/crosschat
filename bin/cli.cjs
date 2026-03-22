@@ -12,6 +12,7 @@ const COMMANDS_DIR = path.join(os.homedir(), ".claude", "commands");
 const COMMAND_SOURCE = path.join(__dirname, "..", "crosschat.md");
 const COMMAND_TARGET = path.join(COMMANDS_DIR, "crosschat.md");
 const HOOK_SOURCE = path.join(__dirname, "..", "hooks", "permission-hook.sh");
+const STABLE_HOOK = path.join(os.homedir(), ".crosschat", "hooks", "permission-hook.sh");
 const MCP_KEY = "crosschat";
 
 const CROSSCHAT_PERMISSIONS = [
@@ -141,12 +142,18 @@ function install() {
       addedPerms++;
     }
   }
-  // 2b. Add or update permission hook in settings (PreToolUse)
+  // 2b. Copy hook to stable location and register in settings (PreToolUse)
   if (fs.existsSync(HOOK_SOURCE)) {
+    // Copy to ~/.crosschat/hooks/ so the path survives package updates
+    const stableDir = path.dirname(STABLE_HOOK);
+    fs.mkdirSync(stableDir, { recursive: true });
+    fs.copyFileSync(HOOK_SOURCE, STABLE_HOOK);
+    fs.chmodSync(STABLE_HOOK, 0o755);
+
     if (!settings.hooks) settings.hooks = {};
     if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = [];
 
-    const hookCommand = HOOK_SOURCE;
+    const hookCommand = STABLE_HOOK;
     const existingIdx = settings.hooks.PreToolUse.findIndex((entry) =>
       entry.hooks &&
       entry.hooks.some((h) => h.command && h.command.includes("permission-hook.sh"))

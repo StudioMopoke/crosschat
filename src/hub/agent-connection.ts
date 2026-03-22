@@ -1,3 +1,6 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
 import WebSocket from 'ws';
 import { generateId } from '../util/id.js';
 import { log, logError } from '../util/logger.js';
@@ -69,7 +72,7 @@ export class AgentConnection {
   private disconnectedCallbacks: VoidCallback[] = [];
 
   constructor(
-    private readonly port: number,
+    private port: number,
     private readonly peerId: string,
     private readonly name: string,
     private readonly cwd: string,
@@ -106,6 +109,7 @@ export class AgentConnection {
         name: this.name,
         cwd: this.cwd,
         pid: process.pid,
+        parentPid: process.ppid,
       });
 
       this.startHeartbeat();
@@ -550,12 +554,28 @@ export class AgentConnection {
     }
   }
 
+  /** Re-read the dashboard lock file to pick up a new hub port after restart. */
+  private async refreshPort(): Promise<void> {
+    try {
+      const lockPath = path.join(os.homedir(), '.crosschat', 'dashboard.lock');
+      const content = await fs.readFile(lockPath, 'utf-8');
+      const lock = JSON.parse(content) as { port: number; pid: number };
+      if (lock.port && lock.port !== this.port) {
+        log(`Hub port changed: ${this.port} -> ${lock.port}`);
+        this.port = lock.port;
+      }
+    } catch {
+      // Lock file may not exist yet during hub restart — use existing port
+    }
+  }
+
   private scheduleReconnect(): void {
     if (this.stopped || this.reconnectTimer) return;
 
     log(`Reconnecting in ${this.reconnectDelay}ms...`);
-    this.reconnectTimer = setTimeout(() => {
+    this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
+      await this.refreshPort();
       this.doConnect();
     }, this.reconnectDelay);
     this.reconnectTimer.unref();

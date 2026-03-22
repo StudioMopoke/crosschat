@@ -76,6 +76,7 @@ interface ConnectedAgent {
   name: string;
   cwd: string;
   pid: number;
+  parentPid?: number;
   ws: WebSocket;
   status: AgentStatus;
   statusDetail?: string;
@@ -185,6 +186,31 @@ function getServerVersion(): string {
  */
 export async function startHub(): Promise<void> {
   await ensureCrosschatDir();
+
+  // Copy the permission hook to a stable location (~/.crosschat/hooks/)
+  // so settings.json can point to a path that survives package updates.
+  try {
+    const hooksDir = path.join(CROSSCHAT_DIR, 'hooks');
+    await fs.mkdir(hooksDir, { recursive: true });
+    const srcHook = path.join(__dirname, '..', 'hooks', 'permission-hook.sh');
+    const srcHookAlt = path.join(__dirname, '..', '..', 'hooks', 'permission-hook.sh');
+    let hookSource: string | null = null;
+    for (const p of [srcHook, srcHookAlt]) {
+      try {
+        await fs.access(p);
+        hookSource = p;
+        break;
+      } catch { /* try next */ }
+    }
+    if (hookSource) {
+      const destHook = path.join(hooksDir, 'permission-hook.sh');
+      await fs.copyFile(hookSource, destHook);
+      await fs.chmod(destHook, 0o755);
+      log(`Permission hook copied to ${destHook}`);
+    }
+  } catch (err) {
+    logError('Failed to copy permission hook to stable location', err);
+  }
 
   // Check for an already-running hub
   const existingLock = await readDashboardLock();
@@ -316,6 +342,46 @@ export async function startHub(): Promise<void> {
       summary.context = task.context;
     }
     return summary;
+  }
+
+  // ── Task-as-message injection ────────────────────────────────
+
+  /**
+   * Inject a chat message into the room when a task is created,
+   * so agents discover tasks through their normal message listener.
+   */
+  function injectTaskMessage(task: Task): void {
+    const room = rooms.get(task.roomId);
+    if (!room) return;
+
+    const filterParts: string[] = [];
+    if (task.filter?.agentId) filterParts.push(`agent: ${task.filter.agentId}`);
+    if (task.filter?.workingDirReq) filterParts.push(`dir: ${task.filter.workingDirReq}`);
+    if (task.filter?.gitProject) filterParts.push(`project: ${task.filter.gitProject}`);
+    const filterLine = filterParts.length > 0 ? `\nFilter: ${filterParts.join(', ')}` : '';
+    const contextLine = task.context ? `\nContext: ${task.context}` : '';
+
+    const content = `New task from ${task.creatorName}: ${task.description}${contextLine}${filterLine}\nTask ID: ${task.taskId}`;
+
+    const chatMsg: ChatMessage = {
+      messageId: generateId(),
+      roomId: task.roomId,
+      fromPeerId: task.creatorId,
+      fromName: task.creatorName,
+      content,
+      metadata: {
+        taskId: task.taskId,
+        taskAction: 'delegated',
+        filter: task.filter,
+      },
+      timestamp: task.createdAt,
+      source: 'system',
+      importance: 'important',
+    };
+
+    room.messages.push(chatMsg);
+    enforceRoomMessageCap(room).catch((err) => logError('Error enforcing room message cap', err));
+    broadcastRoomMessage(task.roomId, chatMsg);
   }
 
   // ── Mention parsing ──────────────────────────────────────────
@@ -767,6 +833,9 @@ export async function startHub(): Promise<void> {
       broadcastToRoomAgents(agent.currentRoom, { type: 'task.created', task: redactedSummary });
       // Browsers/dashboard see full context
       broadcastToRoomBrowsers(agent.currentRoom, { type: 'task.created', task: fullSummary });
+
+      // Inject task as a chat message so agents discover it via message listeners
+      injectTaskMessage(task);
 
       const targetDesc = task.filter?.agentId ? ` -> ${task.filter.agentId}` : '';
       postActivity(`${agent.name} delegated task "${task.description}"${targetDesc}`);
@@ -1298,6 +1367,25 @@ export async function startHub(): Promise<void> {
     res.json(peers);
   });
 
+  // ── REST: Agent lookup by parent PID (for permission hook) ─────
+
+  app.get('/api/agents/by-parent-pid/:pid', (req, res) => {
+    const parentPid = parseInt(req.params.pid, 10);
+    if (isNaN(parentPid)) {
+      res.status(400).json({ error: 'Invalid PID' });
+      return;
+    }
+
+    for (const agent of agents.values()) {
+      if (agent.parentPid === parentPid) {
+        res.json({ peerId: agent.peerId, name: agent.name, cwd: agent.cwd });
+        return;
+      }
+    }
+
+    res.status(404).json({ error: 'No agent found with that parent PID' });
+  });
+
   // ── REST: Tasks ────────────────────────────────────────────────
 
   app.post('/api/tasks', async (req, res) => {
@@ -1321,6 +1409,10 @@ export async function startHub(): Promise<void> {
       broadcastToRoomAgents(roomId, { type: 'task.created', task: redactedSummary });
       // Dashboard sees full context
       broadcastToRoomBrowsers(roomId, { type: 'task.created', task: fullSummary });
+
+      // Inject task as a chat message so agents discover it via message listeners
+      injectTaskMessage(task);
+
       res.json(fullSummary);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to create task';
@@ -1693,6 +1785,7 @@ end tell`;
             name: msg.name,
             cwd: msg.cwd,
             pid: msg.pid,
+            parentPid: msg.parentPid,
             ws,
             status: 'available',
             statusDetail: undefined,

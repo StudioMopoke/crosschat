@@ -20,7 +20,6 @@ const pkg = require('../package.json') as { version: string };
 
 const CROSSCHAT_DIR = path.join(os.homedir(), '.crosschat');
 const DASHBOARD_LOCK_FILE = path.join(CROSSCHAT_DIR, 'dashboard.lock');
-const SESSIONS_DIR = path.join(CROSSCHAT_DIR, 'sessions');
 const HUB_MAIN_PATH = path.join(__dirname, '..', 'dist', 'hub', 'hub-main.js');
 // When running from dist directly, hub-main.js is a sibling directory
 const HUB_MAIN_PATH_ALT = path.join(__dirname, 'hub', 'hub-main.js');
@@ -243,20 +242,6 @@ export async function startServer(): Promise<void> {
   // 6. Connect to the hub
   agentConnection.connect();
 
-  // 6b. Write session marker so the permission hook can detect this instance.
-  //     Key by parent PID (Claude Code's PID) — the hook uses $PPID which matches.
-  const sessionFile = path.join(SESSIONS_DIR, `${process.ppid}`);
-  try {
-    await fs.mkdir(SESSIONS_DIR, { recursive: true });
-    await fs.writeFile(sessionFile, JSON.stringify({
-      name: peerName,
-      peerId,
-      connectedAt: new Date().toISOString(),
-    }));
-  } catch (err) {
-    logError('Failed to write session marker', err);
-  }
-
   // 7. Create and connect the MCP server
   const mcpServer = createMcpServer(peerId, peerName, messageStore, agentConnection, dashboardInfo);
   const transport = new StdioServerTransport();
@@ -271,9 +256,6 @@ export async function startServer(): Promise<void> {
 
     agentConnection.disconnect();
     await mcpServer.close();
-
-    // Clean up session marker
-    await fs.unlink(sessionFile).catch(() => {});
 
     log('Shutdown complete');
     process.exit(0);

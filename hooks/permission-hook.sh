@@ -2,8 +2,9 @@
 # CrossChat Permission Hook for Claude Code
 #
 # Elevates Claude Code permission requests to the CrossChat dashboard.
-# The script POSTs the request to the hub, then polls until the user
-# approves or denies it from the dashboard UI.
+# The script asks the hub if this Claude Code instance is a CrossChat agent,
+# then POSTs the request to the hub and polls until the user approves or
+# denies it from the dashboard UI.
 #
 # Setup — add to your Claude Code settings (~/.claude/settings.json):
 #
@@ -12,7 +13,7 @@
 #       "matcher": "",
 #       "hooks": [{
 #         "type": "command",
-#         "command": "/path/to/crosschat/hooks/permission-hook.sh",
+#         "command": "~/.crosschat/hooks/permission-hook.sh",
 #         "timeout": 300
 #       }]
 #     }]
@@ -22,20 +23,6 @@
 # Env: CROSSCHAT_HUB_URL (default: auto-detected from ~/.crosschat/dashboard.lock)
 
 set -euo pipefail
-
-# ── Opt-in gate — only crosschat-connected sessions trigger this ──
-
-if [ -n "${CROSSCHAT_AGENT_NAME:-}" ]; then
-  AGENT_NAME="$CROSSCHAT_AGENT_NAME"
-elif [ -f "$HOME/.crosschat/sessions/$PPID" ]; then
-  # MCP-connected instance — read agent name from session marker
-  AGENT_NAME=$(jq -r '.name // empty' "$HOME/.crosschat/sessions/$PPID" 2>/dev/null)
-  if [ -z "$AGENT_NAME" ]; then
-    exit 0  # Marker exists but unreadable — fall through
-  fi
-else
-  exit 0  # Not a crosschat agent — fall through to normal permissions
-fi
 
 # ── Resolve hub URL ───────────────────────────────────────────────
 
@@ -52,6 +39,19 @@ elif [ -f "$LOCK_FILE" ]; then
   fi
 else
   exit 0  # No lock file — fall through to normal permissions
+fi
+
+# ── Hub-mediated agent detection ──────────────────────────────────
+# Ask the hub if our parent process (Claude Code) has a connected
+# CrossChat agent. This is the single source of truth — no env vars
+# or session marker files needed.
+
+AGENT_INFO=$(curl -s --max-time 2 "${HUB_URL}/api/agents/by-parent-pid/${PPID}" 2>/dev/null) || exit 0
+
+# If the hub returns 404 (no agent), the response won't have a name field
+AGENT_NAME=$(echo "$AGENT_INFO" | jq -r '.name // empty' 2>/dev/null)
+if [ -z "$AGENT_NAME" ]; then
+  exit 0  # Not a CrossChat agent — fall through to normal permissions
 fi
 
 # ── Read hook input from stdin ────────────────────────────────────
@@ -159,5 +159,6 @@ ALLOW_EOF
   ELAPSED=$((ELAPSED + INTERVAL))
 done
 
-# Timed out — allow by default
+# Timed out — deny by default (fail-closed for safety)
+jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"CrossChat dashboard permission request timed out (no decision within 5 minutes)"}}'
 exit 0
