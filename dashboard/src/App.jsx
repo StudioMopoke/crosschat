@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { fetchRooms, createRoom, fetchMessages, postMessage, fetchPeers, fetchTasks, fetchTask, createTask, archiveTask, fetchPermissions, decidePermission, fetchInstances, createInstance, deleteInstance, launchInstance, shutdownHub } from './api';
+import { fetchChannels, fetchMessages, postMessage, fetchPeers, fetchThreadMessages, flagAsTask, addBadge, fetchPermissions, decidePermission, fetchInstances, createInstance, deleteInstance, launchInstance, shutdownHub, clearChannel } from './api';
 import { useWebSocket } from './useWebSocket';
 import './App.css';
 
@@ -107,49 +107,18 @@ function PeersBar({ peers, onMentionPeer }) {
   );
 }
 
-function Sidebar({ rooms, activeRoomId, onSelectRoom, onCreateRoom, peers, onMentionPeer }) {
-  const [newRoomName, setNewRoomName] = useState('');
-  const [creating, setCreating] = useState(false);
-
-  const handleCreate = async (e) => {
-    e.preventDefault();
-    if (!newRoomName.trim()) return;
-    setCreating(true);
-    await onCreateRoom(newRoomName.trim());
-    setNewRoomName('');
-    setCreating(false);
-  };
-
+function Sidebar({ peers, onMentionPeer }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
         <h1>CrossChat</h1>
       </div>
       <PeersBar peers={peers} onMentionPeer={onMentionPeer} />
-      <ul className="room-list">
-        {rooms.map((room) => (
-          <li
-            key={room.id}
-            className={`room-item ${room.id === activeRoomId ? 'active' : ''}`}
-            onClick={() => onSelectRoom(room.id)}
-          >
-            <span className="room-name"># {room.name}</span>
-          </li>
-        ))}
-        {rooms.length === 0 && (
-          <li className="room-item empty">No rooms yet</li>
-        )}
+      <ul className="channel-list">
+        <li className="channel-item active">
+          <span className="channel-name"># General</span>
+        </li>
       </ul>
-      <form className="create-room-form" onSubmit={handleCreate}>
-        <input
-          value={newRoomName}
-          onChange={(e) => setNewRoomName(e.target.value)}
-          placeholder="New room name..."
-          maxLength={50}
-          disabled={creating}
-        />
-        <button type="submit" disabled={!newRoomName.trim() || creating}>+</button>
-      </form>
       <div className="sidebar-footer">
         <button
           className="hub-shutdown-btn"
@@ -166,7 +135,51 @@ function Sidebar({ rooms, activeRoomId, onSelectRoom, onCreateRoom, peers, onMen
   );
 }
 
-function ChatArea({ room, messages, username, onSendMessage, events, replyTarget, onClearReply, peers }) {
+// -- Badge color map ----------------------------------------------------------
+
+const BADGE_COLORS = {
+  task: 'blue',
+  'importance:high': 'red',
+  'importance:normal': 'gray',
+  question: 'purple',
+  'git-commit': 'green',
+  project: 'orange',
+};
+
+function badgeColorKey(badge) {
+  if (badge.type === 'importance') return `importance:${badge.value}`;
+  return badge.type;
+}
+
+function MessageBadgeList({ badges }) {
+  if (!badges || !badges.length) return null;
+  return (
+    <span className="message-badge-list">
+      {badges.map((badge, i) => {
+        const key = badgeColorKey(badge);
+        const color = BADGE_COLORS[key] || 'gray';
+        return (
+          <span key={i} className={`badge badge-${badge.type}`} style={{ color }}>
+            {badge.label || badge.value || badge.type}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+// -- Thread indicator ---------------------------------------------------------
+
+function ThreadIndicator({ replyCount }) {
+  if (!replyCount || replyCount <= 0) return null;
+  return (
+    <span className="thread-indicator">
+      {replyCount} {replyCount === 1 ? 'reply' : 'replies'}
+    </span>
+  );
+}
+
+function ChatArea({ channel, messages, username, onSendMessage, events, replyTarget, onClearReply, peers }) {
   const [text, setText] = useState('');
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -195,10 +208,10 @@ function ChatArea({ room, messages, username, onSendMessage, events, replyTarget
     inputRef.current?.focus();
   };
 
-  if (!room) {
+  if (!channel) {
     return (
       <main className="chat-area empty-state">
-        <p>Select a room to view agent activity or start chatting</p>
+        <p>Select a channel to view agent activity or start chatting</p>
       </main>
     );
   }
@@ -213,7 +226,7 @@ function ChatArea({ room, messages, username, onSendMessage, events, replyTarget
           >
             <div className="message-header">
               <span className="message-author">{msg.username}</span>
-              <MessageBadges username={msg.username} peers={peers} />
+              <MessageAuthorBadges username={msg.username} peers={peers} />
               <span className="message-time">
                 {new Date(msg.timestamp).toLocaleTimeString()}
               </span>
@@ -228,11 +241,13 @@ function ChatArea({ room, messages, username, onSendMessage, events, replyTarget
               )}
             </div>
             <div className="message-text">{renderMessageText(msg.text)}</div>
+            <MessageBadgeList badges={msg.badges} />
+            <ThreadIndicator replyCount={msg.threadReplyCount} />
           </div>
         ))}
         {events.map((evt, i) => (
           <div key={`evt-${i}`} className="event-notice">
-            {evt.username} joined the room
+            {evt.username} joined the channel
           </div>
         ))}
         <div ref={messagesEndRef} />
@@ -257,9 +272,9 @@ function ChatArea({ room, messages, username, onSendMessage, events, replyTarget
   );
 }
 
-// ── Message Badges ──────────────────────────────────────────────────
+// -- Message Author Badges (peer info next to author name) --------------------
 
-function MessageBadges({ username, peers }) {
+function MessageAuthorBadges({ username, peers }) {
   if (!peers || !peers.length) return null;
   const peer = peers.find((p) => p.name === username);
   if (!peer) return null;
@@ -290,7 +305,7 @@ function MessageBadges({ username, peers }) {
   );
 }
 
-// ── Mention highlighting ────────────────────────────────────────────
+// -- Mention highlighting -----------------------------------------------------
 
 function renderMessageText(text) {
   const parts = text.split(/(@[\w-]+)/g);
@@ -303,325 +318,7 @@ function renderMessageText(text) {
   });
 }
 
-// ── Status helpers ──────────────────────────────────────────────────
-
-const STATUS_LABELS = {
-  open: 'Open',
-  claimed: 'Claimed',
-  in_progress: 'In Progress',
-  completed: 'Completed',
-  failed: 'Failed',
-  archived: 'Archived',
-};
-
-const STATUS_ORDER = ['open', 'claimed', 'in_progress', 'completed', 'failed'];
-
-function StatusBadge({ status }) {
-  return (
-    <span className={`status-badge ${status}`}>
-      {STATUS_LABELS[status] || status}
-    </span>
-  );
-}
-
-function FilterBadges({ filter }) {
-  if (!filter) return null;
-  const badges = [];
-  if (filter.agentId) badges.push({ label: 'Agent', value: filter.agentId });
-  if (filter.workingDirReq) badges.push({ label: 'Dir', value: filter.workingDirReq });
-  if (filter.gitProject) badges.push({ label: 'Git', value: filter.gitProject });
-  if (badges.length === 0) return null;
-  return (
-    <div className="filter-badges">
-      {badges.map((b, i) => (
-        <span key={i} className="filter-badge" title={`${b.label}: ${b.value}`}>
-          {b.label}: {b.value}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function formatTime(iso) {
-  if (!iso) return '';
-  const d = new Date(iso);
-  return d.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-}
-
-// ── Task Card ───────────────────────────────────────────────────────
-
-function TaskCard({ task, onExpand, expanded, onArchive }) {
-  const [detail, setDetail] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [archiving, setArchiving] = useState(false);
-
-  useEffect(() => {
-    if (expanded && !detail) {
-      setLoading(true);
-      fetchTask(task.taskId)
-        .then(setDetail)
-        .catch(() => {})
-        .finally(() => setLoading(false));
-    }
-  }, [expanded, task.taskId]);
-
-  // Re-fetch detail when task updates come in
-  useEffect(() => {
-    if (expanded && detail) {
-      fetchTask(task.taskId)
-        .then(setDetail)
-        .catch(() => {});
-    }
-  }, [task.updatedAt]);
-
-  const handleArchive = async () => {
-    setArchiving(true);
-    try {
-      await onArchive(task.taskId);
-    } finally {
-      setArchiving(false);
-    }
-  };
-
-  const canArchive = task.status === 'completed' || task.status === 'failed';
-
-  return (
-    <div className={`task-card ${expanded ? 'expanded' : ''}`}>
-      <div className="task-card-header" onClick={() => onExpand(expanded ? null : task.taskId)}>
-        <div className="task-card-top">
-          <StatusBadge status={task.status} />
-          <span className="task-card-time">{formatTime(task.createdAt)}</span>
-        </div>
-        <div className="task-card-description">{task.description}</div>
-        <div className="task-card-meta">
-          <span className="task-meta-item">by {task.creatorName}</span>
-          {task.claimantName && (
-            <span className="task-meta-item">assigned: {task.claimantName}</span>
-          )}
-          <span className="task-meta-item">#{task.roomId}</span>
-        </div>
-        <FilterBadges filter={task.filter} />
-      </div>
-
-      {expanded && (
-        <div className="task-card-detail">
-          {loading && <div className="task-loading">Loading...</div>}
-          {detail && (
-            <>
-              {detail.context && (
-                <div className="task-context">
-                  <div className="task-section-label">Context</div>
-                  <div className="task-context-text">{detail.context}</div>
-                </div>
-              )}
-
-              {detail.result && (
-                <div className="task-result">
-                  <div className="task-section-label">Result</div>
-                  <div className="task-result-text">{detail.result}</div>
-                </div>
-              )}
-
-              {detail.notes && detail.notes.length > 0 && (
-                <div className="task-notes">
-                  <div className="task-section-label">Notes ({detail.notes.length})</div>
-                  {[...detail.notes].reverse().map((note) => (
-                    <div key={note.noteId} className="task-note">
-                      <div className="task-note-header">
-                        <span className="task-note-author">{note.authorName}</span>
-                        <span className="task-note-time">{formatTime(note.timestamp)}</span>
-                      </div>
-                      <div className="task-note-content">{note.content}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {canArchive && (
-                <button
-                  className="archive-btn"
-                  onClick={handleArchive}
-                  disabled={archiving}
-                >
-                  {archiving ? 'Archiving...' : 'Archive Task'}
-                </button>
-              )}
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Tasks Panel ─────────────────────────────────────────────────────
-
-function TasksPanel({ tasks, onTasksChange, peers, rooms, activeRoomId, username }) {
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [expandedTaskId, setExpandedTaskId] = useState(null);
-  const [showForm, setShowForm] = useState(false);
-  const [newDesc, setNewDesc] = useState('');
-  const [newContext, setNewContext] = useState('');
-  const [targetAgent, setTargetAgent] = useState('');
-  const [targetRoom, setTargetRoom] = useState(activeRoomId || 'general');
-  const [creating, setCreating] = useState(false);
-  const [error, setError] = useState(null);
-  const loading = tasks.length === 0 && statusFilter === 'all';
-
-  useEffect(() => {
-    if (activeRoomId) setTargetRoom(activeRoomId);
-  }, [activeRoomId]);
-
-  const handleArchive = async (taskId) => {
-    try {
-      await archiveTask(taskId);
-      if (onTasksChange) onTasksChange();
-      if (expandedTaskId === taskId) setExpandedTaskId(null);
-    } catch (err) {
-      console.error('Failed to archive task:', err);
-    }
-  };
-
-  const handleCreate = async (e) => {
-    e.preventDefault();
-    if (!newDesc.trim()) return;
-    setCreating(true);
-    setError(null);
-    try {
-      const filter = targetAgent ? { agentId: targetAgent } : undefined;
-      await createTask(targetRoom, newDesc.trim(), newContext.trim() || undefined, filter, username);
-      setNewDesc('');
-      setNewContext('');
-      setTargetAgent('');
-      setShowForm(false);
-      if (onTasksChange) onTasksChange();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  const filtered = statusFilter === 'all'
-    ? tasks.filter((t) => t.status !== 'archived')
-    : tasks.filter((t) => t.status === statusFilter);
-
-  const statusCounts = {};
-  for (const t of tasks) {
-    if (t.status !== 'archived') {
-      statusCounts[t.status] = (statusCounts[t.status] || 0) + 1;
-    }
-  }
-
-  return (
-    <main className="tasks-panel">
-      <div className="tasks-header">
-        <div className="tasks-filters">
-          <button
-            className={`tasks-filter-btn ${statusFilter === 'all' ? 'active' : ''}`}
-            onClick={() => setStatusFilter('all')}
-          >
-            All ({tasks.filter((t) => t.status !== 'archived').length})
-          </button>
-          {STATUS_ORDER.map((s) => (
-            <button
-              key={s}
-              className={`tasks-filter-btn ${statusFilter === s ? 'active' : ''}`}
-              onClick={() => setStatusFilter(s)}
-            >
-              {STATUS_LABELS[s]} ({statusCounts[s] || 0})
-            </button>
-          ))}
-        </div>
-        <button
-          className="tasks-add-btn"
-          onClick={() => setShowForm(!showForm)}
-        >
-          {showForm ? 'Cancel' : '+ New Task'}
-        </button>
-      </div>
-
-      {error && (
-        <div className="tasks-error" onClick={() => setError(null)}>
-          {error}
-        </div>
-      )}
-
-      {showForm && (
-        <form className="task-form" onSubmit={handleCreate}>
-          <textarea
-            autoFocus
-            value={newDesc}
-            onChange={(e) => setNewDesc(e.target.value)}
-            placeholder="Task description — what needs to be done..."
-            rows={2}
-            maxLength={500}
-            disabled={creating}
-          />
-          <textarea
-            value={newContext}
-            onChange={(e) => setNewContext(e.target.value)}
-            placeholder="Context (optional) — background, constraints, details..."
-            rows={2}
-            maxLength={2000}
-            disabled={creating}
-          />
-          <div className="task-form-row">
-            <select
-              value={targetRoom}
-              onChange={(e) => setTargetRoom(e.target.value)}
-              disabled={creating}
-            >
-              {rooms.map((r) => (
-                <option key={r.id} value={r.id}>#{r.name}</option>
-              ))}
-            </select>
-            <select
-              value={targetAgent}
-              onChange={(e) => setTargetAgent(e.target.value)}
-              disabled={creating}
-            >
-              <option value="">Any agent</option>
-              {peers.map((p) => (
-                <option key={p.peerId} value={p.peerId}>
-                  {p.name} ({p.status})
-                </option>
-              ))}
-            </select>
-            <button type="submit" disabled={!newDesc.trim() || creating}>
-              {creating ? 'Creating...' : 'Delegate Task'}
-            </button>
-          </div>
-        </form>
-      )}
-
-      <div className="tasks-list">
-        {loading && tasks.length === 0 && (
-          <div className="tasks-empty">Loading tasks...</div>
-        )}
-        {!loading && filtered.length === 0 && (
-          <div className="tasks-empty">No tasks{statusFilter !== 'all' ? ` with status "${STATUS_LABELS[statusFilter]}"` : ''}</div>
-        )}
-        {filtered.map((task) => (
-          <TaskCard
-            key={task.taskId}
-            task={task}
-            expanded={expandedTaskId === task.taskId}
-            onExpand={setExpandedTaskId}
-            onArchive={handleArchive}
-          />
-        ))}
-      </div>
-    </main>
-  );
-}
-
-// ── Instances Panel ───────────────────────────────────────────────────
+// -- Instances Panel ----------------------------------------------------------
 
 function InstanceCard({ instance, onLaunch, onRemove }) {
   const [launching, setLaunching] = useState(false);
@@ -811,7 +508,7 @@ function InstancesPanel({ peers }) {
   );
 }
 
-// ── Permission Popup ─────────────────────────────────────────────────
+// -- Permission Popup ---------------------------------------------------------
 
 function toolInputSummary(toolName, toolInput) {
   if (!toolInput) return null;
@@ -884,33 +581,24 @@ function PermissionPopups({ permissions, onDecide }) {
   );
 }
 
-// ── Main App ────────────────────────────────────────────────────────
+// -- Main App -----------------------------------------------------------------
 
 export default function App() {
   const [username, setUsername] = useState(() => localStorage.getItem('crosschat-username') || '');
-  const [rooms, setRooms] = useState([]);
-  const [activeRoomId, setActiveRoomId] = useState(null);
+  const [channels, setChannels] = useState([]);
+  const [activeChannelId, setActiveChannelId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [events, setEvents] = useState([]);
   const [peers, setPeers] = useState([]);
-  const [tasks, setTasks] = useState([]);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('chat');
   const [replyTarget, setReplyTarget] = useState(null);
   const [permissions, setPermissions] = useState([]);
 
-  const activeRoomIdRef = useRef(activeRoomId);
-  activeRoomIdRef.current = activeRoomId;
+  const activeChannelIdRef = useRef(activeChannelId);
+  activeChannelIdRef.current = activeChannelId;
 
   const handleWsMessage = useCallback((data) => {
-    if (data.type === 'roomCreated') {
-      setRooms((prev) => {
-        if (prev.some((r) => r.id === data.room.id)) return prev;
-        return [...prev, data.room];
-      });
-      return;
-    }
-
     // Permission events
     if (data.type === 'permission.request') {
       setPermissions((prev) => {
@@ -937,40 +625,36 @@ export default function App() {
       return;
     }
 
-    // Task events — update in-place for real-time dashboard
-    if (data.type === 'task.created') {
-      setTasks((prev) => {
-        if (prev.some((t) => t.taskId === data.task.taskId)) return prev;
-        return [data.task, ...prev];
-      });
-      return;
-    }
-    if (data.type === 'task.claimed') {
-      setTasks((prev) => prev.map((t) =>
-        t.taskId === data.taskId ? { ...t, status: 'claimed', claimantId: data.claimantId, claimantName: data.claimantName } : t
-      ));
-      return;
-    }
-    if (data.type === 'task.claimAccepted') {
-      setTasks((prev) => prev.map((t) =>
-        t.taskId === data.taskId ? { ...t, status: 'in_progress' } : t
-      ));
-      return;
-    }
-    if (data.type === 'task.updated') {
-      setTasks((prev) => prev.map((t) =>
-        t.taskId === data.taskId ? { ...t, updatedAt: data.note?.timestamp || new Date().toISOString() } : t
-      ));
-      return;
-    }
-    if (data.type === 'task.completed') {
-      setTasks((prev) => prev.map((t) =>
-        t.taskId === data.taskId ? { ...t, status: data.status, result: data.result } : t
-      ));
+    // Badge added to a message
+    if (data.type === 'message.badgeAdded' || data.type === 'badgeUpdate') {
+      setMessages((prev) => prev.map((m) => {
+        const msgId = m.id || m.messageId;
+        if (msgId === data.messageId) {
+          const existingBadges = m.badges || [];
+          const newBadge = data.badge;
+          if (newBadge && !existingBadges.some((b) => b.type === newBadge.type && b.value === newBadge.value)) {
+            return { ...m, badges: [...existingBadges, newBadge] };
+          }
+        }
+        return m;
+      }));
       return;
     }
 
-    if (data.roomId !== activeRoomIdRef.current) return;
+    // Message updated (e.g. badge list replaced, content edited)
+    if (data.type === 'message.updated') {
+      setMessages((prev) => prev.map((m) => {
+        const msgId = m.id || m.messageId;
+        if (msgId === data.messageId) {
+          return { ...m, ...data.message };
+        }
+        return m;
+      }));
+      return;
+    }
+
+    // Only process channel-scoped events for the active channel
+    if (data.channelId !== activeChannelIdRef.current && data.roomId !== activeChannelIdRef.current) return;
 
     if (data.type === 'message') {
       setMessages((prev) => {
@@ -985,7 +669,6 @@ export default function App() {
   const handleWsReconnect = useCallback(() => {
     // Re-fetch all state on WebSocket reconnect to clear stale data
     fetchPeers().then(setPeers).catch(() => {});
-    fetchTasks().then(setTasks).catch(() => {});
     fetchPermissions().then(setPermissions).catch(() => {});
   }, []);
 
@@ -993,20 +676,21 @@ export default function App() {
 
   useEffect(() => {
     if (!username) return;
-    fetchRooms()
-      .then((fetchedRooms) => {
-        setRooms(fetchedRooms);
-        // Auto-select the CrossChat Activity room
-        const crosschatRoom = fetchedRooms.find((r) => r.id === 'crosschat');
-        if (crosschatRoom && !activeRoomId) {
-          setActiveRoomId('crosschat');
+    fetchChannels()
+      .then((fetchedChannels) => {
+        setChannels(fetchedChannels);
+        // Auto-select the general channel
+        const generalChannel = fetchedChannels.find((c) => c.id === 'general') || fetchedChannels.find((c) => c.id === 'crosschat');
+        if (generalChannel && !activeChannelId) {
+          setActiveChannelId(generalChannel.id);
+        } else if (fetchedChannels.length > 0 && !activeChannelId) {
+          setActiveChannelId(fetchedChannels[0].id);
         }
       })
       .catch((err) => setError(err.message));
 
-    // Initial fetch for peers, tasks, and permissions — then rely on WebSocket events
+    // Initial fetch for peers and permissions — then rely on WebSocket events
     fetchPeers().then(setPeers).catch(() => {});
-    fetchTasks().then(setTasks).catch(() => {});
     fetchPermissions().then(setPermissions).catch(() => {});
   }, [username]);
 
@@ -1020,34 +704,24 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!activeRoomId) return;
+    if (!activeChannelId) return;
     setMessages([]);
     setEvents([]);
-    fetchMessages(activeRoomId)
+    fetchMessages(activeChannelId)
       .then(setMessages)
       .catch((err) => setError(err.message));
 
-    wsSend({ type: 'join', roomId: activeRoomId });
-  }, [activeRoomId, wsSend]);
+    wsSend({ type: 'join', channelId: activeChannelId });
+  }, [activeChannelId, wsSend]);
 
   const handleSetUsername = (name) => {
     localStorage.setItem('crosschat-username', name);
     setUsername(name);
   };
 
-  const handleCreateRoom = async (name) => {
-    try {
-      const room = await createRoom(name);
-      setRooms((prev) => [...prev, room]);
-      setActiveRoomId(room.id);
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-
   const handleSendMessage = async (text) => {
     try {
-      await postMessage(activeRoomId, username, text);
+      await postMessage(activeChannelId, username, text);
     } catch (err) {
       setError(err.message);
     }
@@ -1057,7 +731,7 @@ export default function App() {
     return <UsernamePrompt onSubmit={handleSetUsername} />;
   }
 
-  const activeRoom = rooms.find((r) => r.id === activeRoomId) || null;
+  const activeChannel = channels.find((c) => c.id === activeChannelId) || null;
 
   return (
     <div className="app">
@@ -1068,10 +742,6 @@ export default function App() {
         </div>
       )}
       <Sidebar
-        rooms={rooms}
-        activeRoomId={activeRoomId}
-        onSelectRoom={(id) => { setActiveRoomId(id); setActiveTab('chat'); }}
-        onCreateRoom={handleCreateRoom}
         peers={peers}
         onMentionPeer={(name) => { setReplyTarget(name); setActiveTab('chat'); }}
       />
@@ -1082,13 +752,7 @@ export default function App() {
               className={`tab-item ${activeTab === 'chat' ? 'active' : ''}`}
               onClick={() => setActiveTab('chat')}
             >
-              Chat{activeRoom ? ` — #${activeRoom.name}` : ''}
-            </button>
-            <button
-              className={`tab-item ${activeTab === 'tasks' ? 'active' : ''}`}
-              onClick={() => setActiveTab('tasks')}
-            >
-              Tasks
+              Chat{activeChannel ? ` — #${activeChannel.name}` : ''}
             </button>
             <button
               className={`tab-item ${activeTab === 'instances' ? 'active' : ''}`}
@@ -1101,7 +765,7 @@ export default function App() {
 
         {activeTab === 'chat' ? (
           <ChatArea
-            room={activeRoom}
+            channel={activeChannel}
             messages={messages}
             username={username}
             onSendMessage={handleSendMessage}
@@ -1109,15 +773,6 @@ export default function App() {
             replyTarget={replyTarget}
             onClearReply={() => setReplyTarget(null)}
             peers={peers}
-          />
-        ) : activeTab === 'tasks' ? (
-          <TasksPanel
-            tasks={tasks}
-            onTasksChange={() => fetchTasks().then(setTasks).catch(() => {})}
-            peers={peers}
-            rooms={rooms}
-            activeRoomId={activeRoomId}
-            username={username}
           />
         ) : (
           <InstancesPanel peers={peers} />
