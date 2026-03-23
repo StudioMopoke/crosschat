@@ -5,11 +5,11 @@ import type { MessageStore } from '../stores/message-store.js';
 export function registerGetMessages(server: McpServer, messageStore: MessageStore): void {
   server.tool(
     'get_messages',
-    'Get messages from your current room. Returns messages received since you joined.',
+    'Get messages from the channel. Returns messages with badges for at-a-glance context.',
     {
       limit: z.number().optional().describe('Maximum number of messages to return (default: all)'),
       unreadOnly: z.boolean().optional().describe('If true, only return unread messages'),
-      markAsRead: z.boolean().optional().describe('Whether to mark returned messages as read (default: true). Set to false to peek without consuming.'),
+      markAsRead: z.boolean().optional().describe('Whether to mark returned messages as read (default: true)'),
     },
     async ({ limit, unreadOnly, markAsRead }) => {
       try {
@@ -18,7 +18,6 @@ export function registerGetMessages(server: McpServer, messageStore: MessageStor
           unreadOnly,
         });
 
-        // Mark as read by default
         if (markAsRead !== false && messages.length > 0) {
           messageStore.markAsRead(messages.map((m) => m.messageId));
         }
