@@ -78,7 +78,7 @@ export function createMcpServer(
 
   // --- Messaging tools ---
   registerSendMessage(server, agentConnection);
-  registerGetMessages(server, messageStore);
+  registerGetMessages(server, messageStore, agentConnection);
   registerWaitForMessages(server, messageStore);
 
   // --- Peer tools ---

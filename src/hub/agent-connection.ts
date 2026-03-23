@@ -110,8 +110,8 @@ export class AgentConnection {
       try {
         const msg = decodeMessage(raw.toString()) as ServerMessage;
         this.handleServerMessage(msg);
-      } catch {
-        // Ignore malformed messages
+      } catch (err) {
+        logError('Failed to handle server message', err);
       }
     });
 

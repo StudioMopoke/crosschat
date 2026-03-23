@@ -5,10 +5,8 @@ import type { AgentConnection } from '../hub/agent-connection.js';
 export function registerListPeers(server: McpServer, agentConnection: AgentConnection): void {
   server.tool(
     'list_peers',
-    'List all connected CrossChat instances. Shows name, status, working directory, and current room.',
-    {
-      includeMetadata: z.boolean().optional().describe('Kept for compatibility — metadata is always included now'),
-    },
+    'List all connected CrossChat instances. Shows name, status, and working directory.',
+    {},
     async () => {
       try {
         const peers = await agentConnection.listPeers();

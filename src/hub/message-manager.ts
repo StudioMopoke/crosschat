@@ -109,6 +109,7 @@ const MESSAGES_DIR = path.join(os.homedir(), '.crosschat', 'messages');
 const THREADS_DIR = path.join(MESSAGES_DIR, 'threads');
 const TASKS_DIR = path.join(MESSAGES_DIR, 'tasks');
 const CHANNEL_MESSAGE_CAP = 200;
+const THREAD_MESSAGE_CAP = 500;
 
 type MessageCallback = (message: Message) => void;
 type BadgeCallback = (messageId: string, badge: Badge) => void;
@@ -167,6 +168,15 @@ export class MessageManager {
         path.join(THREADS_DIR, `${message.threadId}.jsonl`),
         message,
       );
+
+      // Enforce thread cap — evict oldest from memory (disk retains full history)
+      if (thread.length > THREAD_MESSAGE_CAP) {
+        const overflow = thread.length - THREAD_MESSAGE_CAP;
+        const evicted = thread.splice(0, overflow);
+        for (const msg of evicted) {
+          this.messageIndex.delete(msg.messageId);
+        }
+      }
     } else {
       // Channel message
       const channel = this.channelMessages.get(message.channelId) ?? [];

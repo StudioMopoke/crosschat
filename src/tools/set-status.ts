@@ -9,11 +9,11 @@ export function registerSetStatus(server: McpServer, agentConnection: AgentConne
     {
       status: z.enum(['available', 'busy']).describe('"available" = ready for work, "busy" = currently working on something'),
       detail: z.string().optional().describe('What you\'re doing (e.g., "Running tests for auth module"). Shown to other peers in list_peers.'),
-      taskId: z.string().optional().describe('The task ID you\'re working on, if applicable'),
+      taskMessageId: z.string().optional().describe('The messageId of the flagged task you\'re working on, if applicable'),
     },
-    async ({ status, detail, taskId }) => {
+    async ({ status, detail, taskMessageId }) => {
       try {
-        agentConnection.setStatus(status, detail, taskId);
+        agentConnection.setStatus(status, detail, taskMessageId);
 
         return {
           content: [

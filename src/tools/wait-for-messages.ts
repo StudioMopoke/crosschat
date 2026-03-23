@@ -9,7 +9,7 @@ const MAX_TIMEOUT_MS = 600_000;
 export function registerWaitForMessages(server: McpServer, messageStore: MessageStore): void {
   server.tool(
     'wait_for_messages',
-    'Wait for the next message in your current room. Blocks until a message arrives or timeout.',
+    'Wait for the next message. Blocks until a message arrives in the channel or timeout.',
     {
       timeoutMs: z.number().optional().describe('How long to wait in milliseconds (default: 30000, max: 600000). Returns a timeout result if no message arrives.'),
       broadcastCooldownMs: z.number().optional().describe('Delay in ms before returning broadcast messages (not direct @mentions). Used to stagger responses across agents so earlier responders can be seen by later ones. Set this to a random value (0-500) seeded at init time.'),
