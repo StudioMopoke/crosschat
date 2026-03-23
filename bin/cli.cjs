@@ -16,23 +16,16 @@ const STABLE_HOOK = path.join(os.homedir(), ".crosschat", "hooks", "permission-h
 const MCP_KEY = "crosschat";
 
 const CROSSCHAT_PERMISSIONS = [
-  "mcp__crosschat__wait_for_messages",
-  "mcp__crosschat__get_messages",
-  "mcp__crosschat__list_peers",
   "mcp__crosschat__send_message",
+  "mcp__crosschat__get_messages",
+  "mcp__crosschat__wait_for_messages",
+  "mcp__crosschat__list_peers",
   "mcp__crosschat__set_status",
-  "mcp__crosschat__complete_task",
-  "mcp__crosschat__delegate_task",
-  "mcp__crosschat__get_task_status",
-  "mcp__crosschat__join_room",
-  "mcp__crosschat__create_room",
+  "mcp__crosschat__flag_as_task",
   "mcp__crosschat__claim_task",
-  "mcp__crosschat__accept_claim",
-  "mcp__crosschat__update_task",
-  "mcp__crosschat__list_tasks",
+  "mcp__crosschat__resolve_task",
+  "mcp__crosschat__add_badge",
   "mcp__crosschat__clear_session",
-  "mcp__crosschat__get_room_digest",
-  "mcp__crosschat__request_digest",
 ];
 
 const { spawn } = require("child_process");
