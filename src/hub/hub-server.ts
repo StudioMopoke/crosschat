@@ -9,14 +9,15 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { generateId } from '../util/id.js';
 import { isProcessAlive } from '../util/pid.js';
 import { log, logError } from '../util/logger.js';
-import { TaskManager, type Task } from './task-manager.js';
+import { MessageManager, type Message, type Badge, type TaskFilter, type TaskMeta } from './message-manager.js';
 import {
   type AgentMessage,
   type ServerMessage,
+  type ChannelMessageMessage,
+  type MessagesResponseMessage,
   type PeerInfo,
   type AgentStatus,
-  type TaskNote,
-  type TaskSummary,
+  type MessageImportance,
   encodeMessage,
   decodeMessage,
 } from './protocol.js';
@@ -35,7 +36,6 @@ const INSTANCES_FILE = path.join(CROSSCHAT_DIR, 'instances.json');
 const REGISTER_TIMEOUT_MS = 5_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const PONG_TIMEOUT_MS = 10_000;
-const ROOM_MESSAGE_CAP = 200;
 const IDLE_SHUTDOWN_MS = 5 * 60 * 1000; // 5 minutes with no agents → auto-shutdown
 const PERMISSION_TTL_MS = 10 * 60 * 1000;  // 10 minutes for pending permissions
 const PERMISSION_SWEEP_INTERVAL_MS = 60_000;
@@ -80,31 +80,8 @@ interface ConnectedAgent {
   ws: WebSocket;
   status: AgentStatus;
   statusDetail?: string;
-  currentRoom: string;
+  currentChannel: string;
   connectedAt: string;
-}
-
-type MessageImportance = 'important' | 'comment' | 'chitchat';
-
-interface ChatMessage {
-  messageId: string;
-  roomId: string;
-  fromPeerId: string;
-  fromName: string;
-  content: string;
-  metadata?: Record<string, unknown>;
-  timestamp: string;
-  source: 'agent' | 'user' | 'system';
-  mentions?: string[];       // mentioned agent names (e.g., ["crosschat-20cd"])
-  mentionType?: 'direct' | 'here' | 'broadcast';  // how the message is targeted
-  importance?: MessageImportance;
-}
-
-interface Room {
-  id: string;
-  name: string;
-  messages: ChatMessage[];
-  createdAt: string;
 }
 
 // ── Lock file helpers ────────────────────────────────────────────────
@@ -182,7 +159,7 @@ function getServerVersion(): string {
  * Start the hub server.
  *
  * Central hub for CrossChat: manages agent WebSocket connections, peer registry,
- * rooms, message routing, tasks, and serves the React dashboard frontend.
+ * channels, message routing, tasks (via badges), and serves the React dashboard frontend.
  */
 export async function startHub(): Promise<void> {
   await ensureCrosschatDir();
@@ -222,20 +199,17 @@ export async function startHub(): Promise<void> {
   // ── State ──────────────────────────────────────────────────────
 
   const agents = new Map<string, ConnectedAgent>();
-  const rooms = new Map<string, Room>();
+  const channels = new Set<string>();
   const browserClients = new Set<WebSocket>();
-  const browserRooms = new WeakMap<WebSocket, Set<string>>();
+  const browserChannels = new WeakMap<WebSocket, Set<string>>();
   const browserTokens = new Map<WebSocket, string>();   // session tokens for permission decisions
   const validTokens = new Set<string>();                 // fast lookup for REST auth
   const pendingPermissions = new Map<string, PendingPermission>();
   const instances = await loadInstances();
 
-  // Initialize TaskManager
-  const taskManager = new TaskManager();
-  await taskManager.init();
-
-  // Digest tracking: roomId -> taskId of currently active digest task
-  const activeDigestTasks = new Map<string, string>();
+  // Initialize MessageManager (replaces TaskManager + in-memory channel messages)
+  const messageManager = new MessageManager();
+  await messageManager.init();
 
   // Idle shutdown: auto-shutdown when no agents are connected for IDLE_SHUTDOWN_MS
   let idleShutdownTimer: NodeJS.Timeout | null = null;
@@ -243,19 +217,10 @@ export async function startHub(): Promise<void> {
   // Ensure digests directory exists
   await fs.mkdir(DIGESTS_DIR, { recursive: true });
 
-  // Seed default rooms
-  rooms.set('general', {
-    id: 'general',
-    name: 'General',
-    messages: [],
-    createdAt: new Date().toISOString(),
-  });
-  rooms.set('crosschat', {
-    id: 'crosschat',
-    name: 'CrossChat Activity',
-    messages: [],
-    createdAt: new Date().toISOString(),
-  });
+  // Seed default channels
+  channels.add('general');
+  channels.add('crosschat');
+
 
   // ── Helpers ────────────────────────────────────────────────────
 
@@ -272,7 +237,7 @@ export async function startHub(): Promise<void> {
   async function autoRegisterInstance(cwd: string): Promise<void> {
     const resolvedPath = path.resolve(cwd);
 
-    // Skip if path has unsafe characters (same check as POST /api/instances)
+    // Skip if path has unsafe characters
     if (!/^[a-zA-Z0-9\s/\-_\.~]+$/.test(resolvedPath)) return;
 
     // Skip if an instance with this path already exists
@@ -319,85 +284,19 @@ export async function startHub(): Promise<void> {
       pid: agent.pid,
       status: agent.status,
       statusDetail: agent.statusDetail,
-      currentRoom: agent.currentRoom,
+      currentChannel: agent.currentChannel,
       connectedAt: agent.connectedAt,
     };
   }
 
-  function taskToSummary(task: Task, opts?: { includeContext?: boolean }): TaskSummary {
-    const summary: TaskSummary = {
-      taskId: task.taskId,
-      roomId: task.roomId,
-      creatorId: task.creatorId,
-      creatorName: task.creatorName,
-      description: task.description,
-      filter: task.filter,
-      status: task.status,
-      claimantId: task.claimantId,
-      claimantName: task.claimantName,
-      createdAt: task.createdAt,
-      updatedAt: task.updatedAt,
-    };
-    if (opts?.includeContext !== false && task.context) {
-      summary.context = task.context;
-    }
-    return summary;
-  }
-
-  // ── Task-as-message injection ────────────────────────────────
-
-  /**
-   * Inject a chat message into the room when a task is created,
-   * so agents discover tasks through their normal message listener.
-   */
-  function injectTaskMessage(task: Task): void {
-    const room = rooms.get(task.roomId);
-    if (!room) return;
-
-    const filterParts: string[] = [];
-    if (task.filter?.agentId) filterParts.push(`agent: ${task.filter.agentId}`);
-    if (task.filter?.workingDirReq) filterParts.push(`dir: ${task.filter.workingDirReq}`);
-    if (task.filter?.gitProject) filterParts.push(`project: ${task.filter.gitProject}`);
-    const filterLine = filterParts.length > 0 ? `\nFilter: ${filterParts.join(', ')}` : '';
-    const contextLine = task.context ? `\nContext: ${task.context}` : '';
-
-    const content = `New task from ${task.creatorName}: ${task.description}${contextLine}${filterLine}\nTask ID: ${task.taskId}`;
-
-    const chatMsg: ChatMessage = {
-      messageId: generateId(),
-      roomId: task.roomId,
-      fromPeerId: task.creatorId,
-      fromName: task.creatorName,
-      content,
-      metadata: {
-        taskId: task.taskId,
-        taskAction: 'delegated',
-        filter: task.filter,
-      },
-      timestamp: task.createdAt,
-      source: 'system',
-      importance: 'important',
-    };
-
-    room.messages.push(chatMsg);
-    enforceRoomMessageCap(room).catch((err) => logError('Error enforcing room message cap', err));
-    broadcastRoomMessage(task.roomId, chatMsg);
-  }
-
   // ── Mention parsing ──────────────────────────────────────────
 
-  /**
-   * Parse @mentions from message content.
-   * Supports @agent-name (targeted) and @here (room broadcast).
-   * Returns the list of mentioned agent names and the mention type.
-   */
   function parseMentions(content: string): { mentions: string[]; mentionType: 'direct' | 'here' | 'broadcast' } {
     const hasHere = /@here\b/i.test(content);
     if (hasHere) {
       return { mentions: [], mentionType: 'here' };
     }
 
-    // Extract all @mentions from the content
     const mentionPattern = /@([\w-]+)/g;
     const rawMentions: string[] = [];
     let match: RegExpExecArray | null;
@@ -430,28 +329,28 @@ export async function startHub(): Promise<void> {
 
   // ── Broadcasting ───────────────────────────────────────────────
 
-  /** Broadcast a server message to all agents in a specific room. */
-  function broadcastToRoomAgents(roomId: string, msg: ServerMessage, excludePeerId?: string): void {
+  /** Broadcast a server message to all agents in a specific channel. */
+  function broadcastToChannelAgents(channelId: string, msg: ServerMessage, excludePeerId?: string): void {
     for (const agent of agents.values()) {
-      if (agent.currentRoom === roomId && agent.peerId !== excludePeerId) {
+      if (agent.currentChannel === channelId && agent.peerId !== excludePeerId) {
         sendToWs(agent.ws, msg);
       }
     }
   }
 
-  /** Broadcast a JSON payload to all browser clients subscribed to a room. */
-  function broadcastToRoomBrowsers(roomId: string, data: Record<string, unknown>): void {
+  /** Broadcast a JSON payload to all browser clients subscribed to a channel. */
+  function broadcastToChannelBrowsers(channelId: string, data: Record<string, unknown>): void {
     const payload = JSON.stringify(data);
     for (const client of browserClients) {
       if (client.readyState !== WebSocket.OPEN) continue;
-      const joined = browserRooms.get(client);
-      if (joined?.has(roomId)) {
+      const joined = browserChannels.get(client);
+      if (joined?.has(channelId)) {
         client.send(payload);
       }
     }
   }
 
-  /** Broadcast to ALL browser clients (not filtered by room). */
+  /** Broadcast to ALL browser clients (not filtered by channel). */
   function broadcastToAllBrowsers(data: Record<string, unknown>): void {
     const payload = JSON.stringify(data);
     for (const client of browserClients) {
@@ -461,13 +360,14 @@ export async function startHub(): Promise<void> {
     }
   }
 
-  /** Broadcast a room message to agents AND browsers in the room, with mention filtering. */
-  function broadcastRoomMessage(roomId: string, msg: ChatMessage, excludePeerId?: string): void {
+  /** Broadcast a channel message to agents AND browsers, with mention filtering. */
+  function broadcastChannelMessage(channelId: string, msg: Message, excludePeerId?: string): void {
     // Build the protocol message for agents
-    const agentMsg: ServerMessage = {
-      type: 'room.message',
-      roomId: msg.roomId,
+    const agentMsg: ChannelMessageMessage = {
+      type: 'channel.message',
+      channelId: msg.channelId,
       messageId: msg.messageId,
+      threadId: msg.threadId,
       fromPeerId: msg.fromPeerId,
       fromName: msg.fromName,
       content: msg.content,
@@ -476,206 +376,62 @@ export async function startHub(): Promise<void> {
       source: msg.source,
       mentions: msg.mentions,
       mentionType: msg.mentionType,
-      importance: msg.importance,
+      importance: msg.metadata?.importance as MessageImportance | undefined,
+      badges: msg.badges,
     };
 
     if (msg.mentionType === 'direct' && msg.mentions && msg.mentions.length > 0) {
       // Direct mention: only deliver to mentioned agents (+ sender echo)
       const mentionedNamesLower = new Set(msg.mentions.map((n) => n.toLowerCase()));
       for (const agent of agents.values()) {
-        if (agent.currentRoom !== roomId) continue;
+        if (agent.currentChannel !== channelId) continue;
         if (agent.peerId === excludePeerId) continue;
         if (mentionedNamesLower.has(agent.name.toLowerCase()) || agent.peerId === msg.fromPeerId) {
           sendToWs(agent.ws, agentMsg);
         }
       }
     } else {
-      // @here or broadcast: deliver to all agents in the room
-      broadcastToRoomAgents(roomId, agentMsg, excludePeerId);
+      // @here or broadcast: deliver to all agents in the channel
+      broadcastToChannelAgents(channelId, agentMsg, excludePeerId);
     }
 
     // Always send to all browsers — dashboard users see everything
-    broadcastToRoomBrowsers(roomId, {
+    broadcastToChannelBrowsers(channelId, {
       type: 'message',
       messageId: msg.messageId,
-      roomId: msg.roomId,
+      channelId: msg.channelId,
+      threadId: msg.threadId,
       username: msg.fromName,
       text: msg.content,
       timestamp: msg.timestamp,
       source: msg.source,
       mentions: msg.mentions,
       mentionType: msg.mentionType,
-      importance: msg.importance,
+      importance: msg.metadata?.importance as string | undefined,
+      badges: msg.badges,
     });
   }
 
-  // ── Activity room ────────────────────────────────────────────
+  // ── Activity channel ────────────────────────────────────────
 
-  /** Post a system event to the CrossChat Activity room. */
+  /** Post a system event to the CrossChat Activity channel. */
   function postActivity(content: string, importance: MessageImportance = 'comment'): void {
-    const room = rooms.get('crosschat');
-    if (!room) return;
-
-    const msg: ChatMessage = {
+    const msg: Message = {
       messageId: generateId(),
-      roomId: 'crosschat',
+      channelId: 'crosschat',
       fromPeerId: 'system',
       fromName: 'system',
       content,
       timestamp: new Date().toISOString(),
       source: 'system',
-      importance,
+      badges: [],
+      metadata: { importance },
     };
 
-    room.messages.push(msg);
-    broadcastRoomMessage('crosschat', msg);
-
-    // Drop oldest messages when cap is exceeded (no digest for activity room)
-    if (room.messages.length > ROOM_MESSAGE_CAP) {
-      room.messages = room.messages.slice(-ROOM_MESSAGE_CAP);
-    }
-  }
-
-  // ── Digest system ─────────────────────────────────────────────
-
-  /**
-   * Enforce the per-room message cap. When exceeded, the oldest messages
-   * are moved to a pending digest JSONL file and a digest task is created.
-   */
-  async function enforceRoomMessageCap(room: Room): Promise<void> {
-    if (room.messages.length <= ROOM_MESSAGE_CAP) return;
-    if (room.id === 'crosschat') return; // activity room handles its own cap via postActivity()
-
-    const overflow = room.messages.length - ROOM_MESSAGE_CAP;
-    const evicted = room.messages.splice(0, overflow);
-
-    // Append evicted messages to pending digest file (one JSON object per line)
-    const pendingPath = path.join(DIGESTS_DIR, `${room.id}.jsonl`);
-    const lines = evicted.map((m) => JSON.stringify(m)).join('\n') + '\n';
-    await fs.appendFile(pendingPath, lines, 'utf-8');
-
-    log(`Room ${room.id}: evicted ${overflow} message(s) to pending digest`);
-
-    // Auto-delegate a digest task if one isn't already active for this room
-    const existingTaskId = activeDigestTasks.get(room.id);
-    if (existingTaskId) {
-      const existingTask = taskManager.get(existingTaskId);
-      if (existingTask && (existingTask.status === 'open' || existingTask.status === 'claimed' || existingTask.status === 'in_progress')) {
-        // A digest task is already in progress — don't create another
-        return;
-      }
-      // Previous task finished or was archived — allow a new one
-      activeDigestTasks.delete(room.id);
-    }
-
-    // Read the pending messages as context for the digest task
-    let pendingContent: string;
-    try {
-      pendingContent = await fs.readFile(pendingPath, 'utf-8');
-    } catch {
-      pendingContent = lines;
-    }
-
-    try {
-      const task = await taskManager.create({
-        roomId: room.id,
-        creatorId: 'system',
-        creatorName: 'system',
-        description: 'Summarize the following room messages into a digest',
-        context: pendingContent,
-      });
-
-      activeDigestTasks.set(room.id, task.taskId);
-
-      // Broadcast task creation — agents see redacted, browsers see full
-      const fullSummary = taskToSummary(task);
-      const redactedSummary = taskToSummary(task, { includeContext: false });
-      broadcastToRoomAgents(room.id, { type: 'task.created', task: redactedSummary });
-      broadcastToRoomBrowsers(room.id, { type: 'task.created', task: fullSummary });
-
-      log(`Digest task ${task.taskId} created for room ${room.id}`);
-      postActivity(`Room "${room.name}" hit message cap — auto-digest initiated`);
-    } catch (err) {
-      logError(`Failed to create digest task for room ${room.id}`, err);
-    }
-  }
-
-  /**
-   * Handle digest task completion: persist the full digest to disk,
-   * clear the pending file, and insert a system message into the room.
-   */
-  async function handleDigestCompletion(task: Task): Promise<void> {
-    const roomId = task.roomId;
-    const digestSummary = task.result ?? '';
-
-    // Read the pending messages that were the basis for this digest
-    const pendingPath = path.join(DIGESTS_DIR, `${roomId}.jsonl`);
-    let pendingMessages = '';
-    try {
-      pendingMessages = await fs.readFile(pendingPath, 'utf-8');
-    } catch {
-      // Pending file may have been cleared already
-    }
-
-    // Persist the full digest to ~/.crosschat/digests/{roomId}/{timestamp}.md
-    const roomDigestDir = path.join(DIGESTS_DIR, roomId);
-    await fs.mkdir(roomDigestDir, { recursive: true });
-
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const digestPath = path.join(roomDigestDir, `${timestamp}.md`);
-
-    // Format original messages for the "Full messages" section
-    let formattedMessages = '';
-    if (pendingMessages.trim()) {
-      const msgLines = pendingMessages.trim().split('\n');
-      for (const line of msgLines) {
-        try {
-          const msg = JSON.parse(line) as ChatMessage;
-          formattedMessages += `**${msg.fromName}** (${msg.timestamp}): ${msg.content}\n\n`;
-        } catch {
-          // Skip malformed lines
-        }
-      }
-    }
-
-    const digestContent = `# Room Digest: ${roomId}\n\n` +
-      `Generated: ${new Date().toISOString()}\n\n` +
-      `## Summary\n\n${digestSummary}\n\n` +
-      `## Full messages\n\n${formattedMessages || '(no messages available)'}`;
-
-    await fs.writeFile(digestPath, digestContent, 'utf-8');
-
-    // Clear the pending file
-    try {
-      await fs.unlink(pendingPath);
-    } catch {
-      // Already gone
-    }
-
-    // Clean up tracking
-    activeDigestTasks.delete(roomId);
-
-    // Insert a system message into the room
-    const firstLine = digestSummary.split('\n')[0].slice(0, 200);
-    const room = rooms.get(roomId);
-    if (room) {
-      const sysMsg: ChatMessage = {
-        messageId: generateId(),
-        roomId,
-        fromPeerId: 'system',
-        fromName: 'system',
-        content: `\u{1F4CB} Room digest: ${firstLine}\n\nFull digest saved to ${digestPath}`,
-        timestamp: new Date().toISOString(),
-        source: 'system',
-        importance: 'important',
-      };
-      room.messages.push(sysMsg);
-      broadcastRoomMessage(roomId, sysMsg);
-    }
-
-    log(`Digest completed for room ${roomId}: ${digestPath}`);
-    const digestRoom = rooms.get(roomId);
-    postActivity(`Digest completed for room "${digestRoom?.name ?? roomId}"`);
+    messageManager.addMessage(msg).catch((err) =>
+      logError('Failed to persist activity message', err),
+    );
+    broadcastChannelMessage('crosschat', msg);
   }
 
   // ── Agent removal ──────────────────────────────────────────────
@@ -706,83 +462,22 @@ export async function startHub(): Promise<void> {
   function handleAgentStatus(agent: ConnectedAgent, msg: AgentMessage & { type: 'agent.status' }): void {
     agent.status = msg.status;
     agent.statusDetail = msg.detail;
-    log(`Agent ${agent.name} status: ${msg.status}${msg.detail ? ` (${msg.detail})` : ''}`);
+    if (msg.taskMessageId) {
+      log(`Agent ${agent.name} status: ${msg.status}${msg.detail ? ` (${msg.detail})` : ''} [task: ${msg.taskMessageId}]`);
+    } else {
+      log(`Agent ${agent.name} status: ${msg.status}${msg.detail ? ` (${msg.detail})` : ''}`);
+    }
     postActivity(`${agent.name} -> ${msg.status}${msg.detail ? ` (${msg.detail})` : ''}`, 'chitchat');
   }
 
-  function handleJoinRoom(agent: ConnectedAgent, msg: AgentMessage & { type: 'agent.joinRoom' }): void {
-    const room = rooms.get(msg.roomId);
-    if (!room) {
-      sendError(agent.ws, `Room not found: ${msg.roomId}`);
-      return;
-    }
-
-    const oldRoom = agent.currentRoom;
-    agent.currentRoom = msg.roomId;
-
-    // Notify the agent
-    sendToWs(agent.ws, { type: 'room.joined', roomId: room.id, name: room.name });
-
-    // Notify browsers about room membership change
-    if (oldRoom !== msg.roomId) {
-      broadcastToRoomBrowsers(oldRoom, {
-        type: 'agentLeft',
-        roomId: oldRoom,
-        peerId: agent.peerId,
-        name: agent.name,
-      });
-      broadcastToRoomBrowsers(msg.roomId, {
-        type: 'agentJoined',
-        roomId: msg.roomId,
-        peerId: agent.peerId,
-        name: agent.name,
-      });
-    }
-
-    log(`Agent ${agent.name} joined room ${msg.roomId}`);
-    postActivity(`${agent.name} joined room "${room.name}"`, 'chitchat');
-  }
-
-  function handleCreateRoom(agent: ConnectedAgent, msg: AgentMessage & { type: 'agent.createRoom' }): void {
-    if (rooms.has(msg.roomId)) {
-      sendError(agent.ws, `Room already exists: ${msg.roomId}`);
-      return;
-    }
-
-    const room: Room = {
-      id: msg.roomId,
-      name: msg.name ?? msg.roomId,
-      messages: [],
-      createdAt: new Date().toISOString(),
-    };
-    rooms.set(msg.roomId, room);
-
-    // Notify the creating agent
-    sendToWs(agent.ws, { type: 'room.created', roomId: room.id, name: room.name });
-
-    // Notify all browser clients about the new room
-    broadcastToAllBrowsers({
-      type: 'roomCreated',
-      room: { id: room.id, name: room.name, createdAt: room.createdAt, messageCount: 0 },
-    });
-
-    log(`Room created: ${room.id} by ${agent.name}`);
-    postActivity(`${agent.name} created room "${room.name}"`);
-  }
-
-  function handleSendMessage(agent: ConnectedAgent, msg: AgentMessage & { type: 'agent.sendMessage' }): void {
-    const roomId = agent.currentRoom;
-    const room = rooms.get(roomId);
-    if (!room) {
-      sendError(agent.ws, `Room not found: ${roomId}`);
-      return;
-    }
-
+  async function handleSendMessage(agent: ConnectedAgent, msg: AgentMessage & { type: 'agent.sendMessage' }): Promise<void> {
+    const channelId = agent.currentChannel;
     const { mentions, mentionType } = parseMentions(msg.content);
 
-    const chatMsg: ChatMessage = {
+    const message: Message = {
       messageId: generateId(),
-      roomId,
+      channelId,
+      threadId: msg.threadId,
       fromPeerId: agent.peerId,
       fromName: agent.name,
       content: msg.content,
@@ -791,13 +486,15 @@ export async function startHub(): Promise<void> {
       source: 'agent',
       mentions: mentions.length > 0 ? mentions : undefined,
       mentionType,
-      importance: msg.importance,
+      badges: [],
     };
 
-    room.messages.push(chatMsg);
-    enforceRoomMessageCap(room).catch((err) => logError('Error enforcing room message cap', err));
-    // Broadcast with mention-based filtering
-    broadcastRoomMessage(roomId, chatMsg);
+    if (msg.importance) {
+      message.metadata = { ...message.metadata, importance: msg.importance };
+    }
+
+    await messageManager.addMessage(message);
+    broadcastChannelMessage(channelId, message);
   }
 
   function handleListPeers(agent: ConnectedAgent, msg: AgentMessage & { type: 'agent.listPeers' }): void {
@@ -810,349 +507,288 @@ export async function startHub(): Promise<void> {
     sendToWs(agent.ws, { type: 'peers', requestId: msg.requestId, peers });
   }
 
-  async function handleTaskCreate(agent: ConnectedAgent, msg: AgentMessage & { type: 'task.create' }): Promise<void> {
+  // ── Badge & Task handlers ─────────────────────────────────────
+
+  /** Broadcast a badge change to all agents in the channel and all browsers. */
+  function broadcastBadgeUpdate(channelId: string, messageId: string, badge: Badge, allBadges: Badge[]): void {
+    // Notify agents in the channel about the new badge
+    broadcastToChannelAgents(channelId, {
+      type: 'message.badgeAdded',
+      messageId,
+      badge,
+    });
+
+    // Notify agents with the full badge array
+    broadcastToChannelAgents(channelId, {
+      type: 'message.updated',
+      messageId,
+      badges: allBadges,
+    });
+
+    // Notify all browsers
+    broadcastToAllBrowsers({
+      type: 'badgeUpdate',
+      messageId,
+      badge,
+      badges: allBadges,
+    });
+  }
+
+  async function handleFlagTask(
+    agent: ConnectedAgent,
+    msg: AgentMessage & { type: 'agent.flagTask' },
+  ): Promise<void> {
     try {
-      const task = await taskManager.create({
-        roomId: agent.currentRoom,
-        creatorId: agent.peerId,
-        creatorName: agent.name,
-        description: msg.description,
-        context: msg.context,
-        filter: msg.filter,
-      });
-
-      const fullSummary = taskToSummary(task);
-      const redactedSummary = taskToSummary(task, { includeContext: false });
-
-      // If the creator sent a requestId, send a direct response with full context
-      if (msg.requestId) {
-        sendToWs(agent.ws, { type: 'task.created', requestId: msg.requestId, task: fullSummary });
+      const meta = await messageManager.flagAsTask(msg.messageId, agent.peerId, msg.filter);
+      if (!meta) {
+        sendError(agent.ws, `Message not found: ${msg.messageId}`, msg.requestId);
+        return;
       }
 
-      // Broadcast to agents WITHOUT context (they must claim to see it)
-      broadcastToRoomAgents(agent.currentRoom, { type: 'task.created', task: redactedSummary });
-      // Browsers/dashboard see full context
-      broadcastToRoomBrowsers(agent.currentRoom, { type: 'task.created', task: fullSummary });
+      const message = messageManager.getMessage(msg.messageId);
+      const badges = message?.badges ?? [];
 
-      // Inject task as a chat message so agents discover it via message listeners
-      injectTaskMessage(task);
+      // Respond to requester
+      sendToWs(agent.ws, {
+        type: 'task.flagged',
+        requestId: msg.requestId,
+        messageId: msg.messageId,
+        badges,
+      });
 
-      const targetDesc = task.filter?.agentId ? ` -> ${task.filter.agentId}` : '';
-      postActivity(`${agent.name} delegated task "${task.description}"${targetDesc}`);
+      // Broadcast badge update to channel
+      const taskBadge = badges.find((b) => b.type === 'task');
+      if (taskBadge && message) {
+        broadcastBadgeUpdate(message.channelId, msg.messageId, taskBadge, badges);
+      }
+
+      postActivity(`${agent.name} flagged message as task: ${msg.messageId}`);
     } catch (err) {
-      sendError(agent.ws, err instanceof Error ? err.message : 'Failed to create task', msg.requestId);
+      sendError(agent.ws, err instanceof Error ? err.message : 'Failed to flag task', msg.requestId);
     }
   }
 
-  async function handleTaskClaim(agent: ConnectedAgent, msg: AgentMessage & { type: 'task.claim' }): Promise<void> {
+  async function handleClaimTask(
+    agent: ConnectedAgent,
+    msg: AgentMessage & { type: 'agent.claimTask' },
+  ): Promise<void> {
     try {
-      const task = await taskManager.claim(msg.taskId, agent.peerId, agent.name);
+      const meta = await messageManager.claimTask(msg.messageId, agent.peerId, agent.name);
 
-      // Notify the task creator
-      const creator = findAgentById(task.creatorId);
-      if (creator) {
-        sendToWs(creator.ws, {
-          type: 'task.claimed',
-          taskId: task.taskId,
-          claimantId: agent.peerId,
-          claimantName: agent.name,
-        });
-      }
+      const message = messageManager.getMessage(msg.messageId);
+      const badges = message?.badges ?? [];
 
-      // Send confirmation to the claimant WITH context (they now own it)
+      // Respond to requester
       sendToWs(agent.ws, {
         type: 'task.claimed',
         requestId: msg.requestId,
-        taskId: task.taskId,
+        messageId: msg.messageId,
         claimantId: agent.peerId,
         claimantName: agent.name,
-        context: task.context,
       });
 
-      // Broadcast to dashboard (no context needed in dashboard broadcast)
-      broadcastToAllBrowsers({ type: 'task.claimed', taskId: task.taskId, claimantId: agent.peerId, claimantName: agent.name });
+      // Notify the message author
+      if (message) {
+        const author = findAgentById(message.fromPeerId);
+        if (author && author.peerId !== agent.peerId) {
+          sendToWs(author.ws, {
+            type: 'task.claimed',
+            requestId: '',
+            messageId: msg.messageId,
+            claimantId: agent.peerId,
+            claimantName: agent.name,
+          });
+        }
 
-      postActivity(`${agent.name} claimed task "${task.description}"`, 'chitchat');
+        // Broadcast badge update
+        const taskBadge = badges.find((b) => b.type === 'task');
+        if (taskBadge) {
+          broadcastBadgeUpdate(message.channelId, msg.messageId, taskBadge, badges);
+        }
+      }
+
+      postActivity(`${agent.name} claimed task on message ${msg.messageId}`, 'chitchat');
     } catch (err) {
       sendError(agent.ws, err instanceof Error ? err.message : 'Failed to claim task', msg.requestId);
     }
   }
 
-  async function handleTaskAccept(agent: ConnectedAgent, msg: AgentMessage & { type: 'task.accept' }): Promise<void> {
+  async function handleResolveTask(
+    agent: ConnectedAgent,
+    msg: AgentMessage & { type: 'agent.resolveTask' },
+  ): Promise<void> {
     try {
-      const task = await taskManager.acceptClaim(msg.taskId, agent.peerId);
-
-      // Notify the claimant
-      if (task.claimantId) {
-        const claimant = findAgentById(task.claimantId);
-        if (claimant) {
-          sendToWs(claimant.ws, {
-            type: 'task.claimAccepted',
-            taskId: task.taskId,
-            assignedTo: task.claimantId,
-          });
-        }
-      }
-
-      // Acknowledge to the creator
-      sendToWs(agent.ws, {
-        type: 'task.claimAccepted',
-        taskId: task.taskId,
-        assignedTo: task.claimantId ?? '',
-      });
-
-      // Broadcast to dashboard
-      broadcastToAllBrowsers({ type: 'task.claimAccepted', taskId: task.taskId, assignedTo: task.claimantId ?? '' });
-
-      postActivity(`${agent.name} accepted claim from ${task.claimantName ?? 'unknown'}`, 'chitchat');
-    } catch (err) {
-      sendError(agent.ws, err instanceof Error ? err.message : 'Failed to accept claim');
-    }
-  }
-
-  async function handleTaskUpdate(agent: ConnectedAgent, msg: AgentMessage & { type: 'task.update' }): Promise<void> {
-    try {
-      const task = await taskManager.update(
-        msg.taskId,
+      const meta = await messageManager.resolveTask(
+        msg.messageId,
         agent.peerId,
-        agent.name,
-        msg.content,
         msg.status,
-      );
-
-      const lastNote = task.notes[task.notes.length - 1];
-
-      // Notify creator and claimant (if they are different from the author)
-      const notifyIds = new Set<string>();
-      if (task.creatorId !== agent.peerId) notifyIds.add(task.creatorId);
-      if (task.claimantId && task.claimantId !== agent.peerId) notifyIds.add(task.claimantId);
-
-      for (const targetId of notifyIds) {
-        const target = findAgentById(targetId);
-        if (target) {
-          sendToWs(target.ws, {
-            type: 'task.updated',
-            taskId: task.taskId,
-            note: lastNote,
-          });
-        }
-      }
-
-      // Also confirm to the sender
-      sendToWs(agent.ws, {
-        type: 'task.updated',
-        taskId: task.taskId,
-        note: lastNote,
-      });
-
-      // Broadcast to dashboard
-      broadcastToAllBrowsers({ type: 'task.updated', taskId: task.taskId, note: lastNote });
-    } catch (err) {
-      sendError(agent.ws, err instanceof Error ? err.message : 'Failed to update task');
-    }
-  }
-
-  async function handleTaskComplete(agent: ConnectedAgent, msg: AgentMessage & { type: 'task.complete' }): Promise<void> {
-    try {
-      const task = await taskManager.complete(
-        msg.taskId,
-        agent.peerId,
-        agent.name,
         msg.result,
-        msg.status,
         msg.error,
       );
 
-      // Notify the creator (skip for system-created digest tasks)
-      if (task.creatorId !== 'system') {
-        const creator = findAgentById(task.creatorId);
-        if (creator) {
-          sendToWs(creator.ws, {
-            type: 'task.completed',
-            taskId: task.taskId,
-            status: msg.status,
-            result: msg.result,
-          });
-        }
-      }
+      const message = messageManager.getMessage(msg.messageId);
+      const badges = message?.badges ?? [];
 
-      // Confirm to the completer
+      // Respond to requester
       sendToWs(agent.ws, {
-        type: 'task.completed',
-        taskId: task.taskId,
+        type: 'task.resolved',
+        requestId: msg.requestId,
+        messageId: msg.messageId,
         status: msg.status,
         result: msg.result,
       });
 
-      // Broadcast to dashboard
-      broadcastToAllBrowsers({ type: 'task.completed', taskId: task.taskId, status: msg.status, result: msg.result });
+      // Notify the message author
+      if (message) {
+        const author = findAgentById(message.fromPeerId);
+        if (author && author.peerId !== agent.peerId) {
+          sendToWs(author.ws, {
+            type: 'task.resolved',
+            requestId: '',
+            messageId: msg.messageId,
+            status: msg.status,
+            result: msg.result,
+          });
+        }
+
+        // Broadcast badge update
+        const taskBadge = badges.find((b) => b.type === 'task');
+        if (taskBadge) {
+          broadcastBadgeUpdate(message.channelId, msg.messageId, taskBadge, badges);
+        }
+      }
 
       if (msg.status === 'completed') {
-        postActivity(`${agent.name} completed task "${task.description}"`, 'important');
+        postActivity(`${agent.name} completed task on message ${msg.messageId}`, 'important');
       } else {
-        postActivity(`${agent.name} failed task "${task.description}"`, 'important');
-      }
-
-      // Check if this is a digest task completion
-      if (msg.status === 'completed' && activeDigestTasks.get(task.roomId) === task.taskId) {
-        await handleDigestCompletion(task);
+        postActivity(`${agent.name} failed task on message ${msg.messageId}`, 'important');
       }
     } catch (err) {
-      sendError(agent.ws, err instanceof Error ? err.message : 'Failed to complete task');
+      sendError(agent.ws, err instanceof Error ? err.message : 'Failed to resolve task', msg.requestId);
     }
   }
+
+  async function handleAddBadge(
+    agent: ConnectedAgent,
+    msg: AgentMessage & { type: 'agent.addBadge' },
+  ): Promise<void> {
+    try {
+      const badge: Badge = {
+        type: msg.badgeType,
+        value: msg.badgeValue,
+        label: msg.label,
+        addedBy: agent.peerId,
+        addedAt: new Date().toISOString(),
+      };
+
+      const updatedMessage = await messageManager.addBadge(msg.messageId, badge);
+      if (!updatedMessage) {
+        sendError(agent.ws, `Message not found: ${msg.messageId}`, msg.requestId);
+        return;
+      }
+
+      // Respond to requester
+      sendToWs(agent.ws, {
+        type: 'badge.added',
+        requestId: msg.requestId,
+        messageId: msg.messageId,
+        badge,
+      });
+
+      // Broadcast badge update to channel
+      broadcastBadgeUpdate(updatedMessage.channelId, msg.messageId, badge, updatedMessage.badges);
+    } catch (err) {
+      sendError(agent.ws, err instanceof Error ? err.message : 'Failed to add badge', msg.requestId);
+    }
+  }
+
+  // ── Message retrieval ─────────────────────────────────────────
+
+  function handleGetMessages(
+    agent: ConnectedAgent,
+    msg: AgentMessage & { type: 'agent.getMessages' },
+  ): void {
+    let messages: Message[];
+
+    if (msg.threadId) {
+      messages = messageManager.getThreadMessages(msg.threadId);
+    } else {
+      messages = messageManager.getChannelMessages(agent.currentChannel, {
+        limit: msg.limit,
+        afterMessageId: msg.afterMessageId,
+      });
+    }
+
+    // Convert Messages to ChannelMessageMessage format for the response
+    const protocolMessages: ChannelMessageMessage[] = messages.map((m) => ({
+      type: 'channel.message' as const,
+      channelId: m.channelId,
+      messageId: m.messageId,
+      threadId: m.threadId,
+      fromPeerId: m.fromPeerId,
+      fromName: m.fromName,
+      content: m.content,
+      metadata: m.metadata,
+      timestamp: m.timestamp,
+      source: m.source,
+      mentions: m.mentions,
+      mentionType: m.mentionType,
+      importance: m.metadata?.importance as MessageImportance | undefined,
+      badges: m.badges,
+    }));
+
+    const response: MessagesResponseMessage = {
+      type: 'messages',
+      requestId: msg.requestId,
+      messages: protocolMessages,
+      threadId: msg.threadId,
+    };
+
+    sendToWs(agent.ws, response);
+  }
+
+  // ── Session management ────────────────────────────────────────
 
   async function handleClearSession(
     agent: ConnectedAgent,
     msg: AgentMessage & { type: 'agent.clearSession' },
   ): Promise<void> {
     const clearMessages = msg.messages !== false; // default true
-    const clearTasks = msg.tasks === true;        // default false
     let messagesCleared = 0;
-    let tasksArchived = 0;
 
     if (clearMessages) {
-      const room = rooms.get(agent.currentRoom);
-      if (room) {
-        messagesCleared = room.messages.length;
-        room.messages = [];
-        // Notify browsers that the room was cleared
-        broadcastToRoomBrowsers(agent.currentRoom, {
-          type: 'sessionCleared',
-          roomId: agent.currentRoom,
-          clearedBy: agent.name,
-          messagesCleared,
-        });
-      }
-    }
+      messagesCleared = messageManager.clearChannel(agent.currentChannel);
 
-    if (clearTasks) {
-      tasksArchived = await taskManager.archiveTerminal(agent.currentRoom);
+      // Notify browsers that the channel was cleared
+      broadcastToChannelBrowsers(agent.currentChannel, {
+        type: 'sessionCleared',
+        channelId: agent.currentChannel,
+        clearedBy: agent.name,
+        messagesCleared,
+      });
     }
 
     sendToWs(agent.ws, {
       type: 'session.cleared',
       requestId: msg.requestId,
       messagesCleared,
-      tasksArchived,
     });
 
-    log(`Session cleared by ${agent.name}: ${messagesCleared} message(s), ${tasksArchived} task(s) archived`);
+    log(`Session cleared by ${agent.name}: ${messagesCleared} message(s)`);
   }
 
-  async function handleRequestDigest(
-    agent: ConnectedAgent,
-    msg: AgentMessage & { type: 'agent.requestDigest' },
-  ): Promise<void> {
-    const room = rooms.get(agent.currentRoom);
-    if (!room || room.messages.length === 0) {
-      sendError(agent.ws, 'No messages in room to digest', msg.requestId);
-      return;
-    }
+  // Return all handler functions so they can be used by dispatch
+  // ── Pending permission sweep ──────────────────────────────────
 
-    // Check if a digest task is already active for this room
-    const existingTaskId = activeDigestTasks.get(agent.currentRoom);
-    if (existingTaskId) {
-      const existingTask = taskManager.get(existingTaskId);
-      if (existingTask && (existingTask.status === 'open' || existingTask.status === 'claimed' || existingTask.status === 'in_progress')) {
-        sendError(agent.ws, `A digest task is already in progress for this room (task ${existingTaskId})`, msg.requestId);
-        return;
+  const permissionSweepInterval = setInterval(() => {
+    const now = Date.now();
+    for (const [id, perm] of pendingPermissions) {
+      if (perm.status === 'pending' && now - new Date(perm.createdAt).getTime() > PERMISSION_TTL_MS) {
+        pendingPermissions.delete(id);
+        log(`Expired stale pending permission: ${id} (${perm.toolName})`);
       }
-      activeDigestTasks.delete(agent.currentRoom);
     }
-
-    // Capture current messages and write to pending digest file
-    const messagesToDigest = [...room.messages];
-    const pendingPath = path.join(DIGESTS_DIR, `${room.id}.jsonl`);
-    const lines = messagesToDigest.map((m) => JSON.stringify(m)).join('\n') + '\n';
-    await fs.appendFile(pendingPath, lines, 'utf-8');
-
-    // Optionally clear room messages
-    const clearMessages = msg.clearMessages === true;
-    if (clearMessages) {
-      room.messages = [];
-      broadcastToRoomBrowsers(agent.currentRoom, {
-        type: 'sessionCleared',
-        roomId: agent.currentRoom,
-        clearedBy: agent.name,
-        messagesCleared: messagesToDigest.length,
-      });
-    }
-
-    // Create digest task
-    let pendingContent: string;
-    try {
-      pendingContent = await fs.readFile(pendingPath, 'utf-8');
-    } catch {
-      pendingContent = lines;
-    }
-
-    try {
-      const task = await taskManager.create({
-        roomId: room.id,
-        creatorId: agent.peerId,
-        creatorName: agent.name,
-        description: 'Summarize the following room messages into a digest',
-        context: pendingContent,
-      });
-
-      activeDigestTasks.set(room.id, task.taskId);
-
-      // Broadcast task creation — agents see redacted, browsers see full
-      const fullSummary = taskToSummary(task);
-      const redactedSummary = taskToSummary(task, { includeContext: false });
-      broadcastToRoomAgents(room.id, { type: 'task.created', task: redactedSummary });
-      broadcastToRoomBrowsers(room.id, { type: 'task.created', task: fullSummary });
-
-      sendToWs(agent.ws, {
-        type: 'digest.requested',
-        requestId: msg.requestId,
-        taskId: task.taskId,
-        messageCount: messagesToDigest.length,
-        messagesCleared: clearMessages,
-      });
-
-      log(`Digest requested by ${agent.name} for room ${room.id}: ${messagesToDigest.length} message(s), task ${task.taskId}`);
-      postActivity(`${agent.name} requested digest for room "${room.name}" (${messagesToDigest.length} messages)`);
-    } catch (err) {
-      logError(`Failed to create digest task for room ${room.id}`, err);
-      sendError(agent.ws, 'Failed to create digest task', msg.requestId);
-    }
-  }
-
-  function handleGetTask(agent: ConnectedAgent, msg: AgentMessage & { type: 'agent.getTask' }): void {
-    const task = taskManager.get(msg.taskId);
-    if (!task) {
-      sendError(agent.ws, `Task not found: ${msg.taskId}`, msg.requestId);
-      return;
-    }
-    // Only include context for participants (creator or claimant)
-    const isParticipant = task.creatorId === agent.peerId || task.claimantId === agent.peerId;
-    const summary = taskToSummary(task, { includeContext: isParticipant });
-    sendToWs(agent.ws, {
-      type: 'task.detail',
-      requestId: msg.requestId,
-      task: { ...summary, notes: task.notes, result: task.result, error: task.error },
-    });
-  }
-
-  function handleListTasks(agent: ConnectedAgent, msg: AgentMessage & { type: 'agent.listTasks' }): void {
-    const filter: { status?: any; roomId?: string; assignedTo?: string } = {};
-    if (msg.status) filter.status = msg.status;
-    if (msg.roomId) filter.roomId = msg.roomId;
-    if (msg.assignedTo) filter.assignedTo = msg.assignedTo;
-
-    const tasks = taskManager.list(Object.keys(filter).length > 0 ? filter : undefined);
-    // Only include context for tasks where the agent is creator or claimant
-    sendToWs(agent.ws, {
-      type: 'tasks',
-      requestId: msg.requestId,
-      tasks: tasks.map((t) => {
-        const isParticipant = t.creatorId === agent.peerId || t.claimantId === agent.peerId;
-        return taskToSummary(t, { includeContext: isParticipant });
-      }),
-    });
-  }
+  }, PERMISSION_SWEEP_INTERVAL_MS);
 
   // ── Agent message dispatch ─────────────────────────────────────
 
@@ -1179,44 +815,29 @@ export async function startHub(): Promise<void> {
         removeAgent(agent.peerId);
         ws.close();
         break;
-      case 'agent.joinRoom':
-        handleJoinRoom(agent, msg);
-        break;
-      case 'agent.createRoom':
-        handleCreateRoom(agent, msg);
-        break;
       case 'agent.sendMessage':
-        handleSendMessage(agent, msg);
+        await handleSendMessage(agent, msg);
         break;
       case 'agent.listPeers':
         handleListPeers(agent, msg);
         break;
-      case 'task.create':
-        await handleTaskCreate(agent, msg);
+      case 'agent.getMessages':
+        handleGetMessages(agent, msg);
         break;
-      case 'task.claim':
-        await handleTaskClaim(agent, msg);
+      case 'agent.flagTask':
+        await handleFlagTask(agent, msg);
         break;
-      case 'task.accept':
-        await handleTaskAccept(agent, msg);
+      case 'agent.claimTask':
+        await handleClaimTask(agent, msg);
         break;
-      case 'task.update':
-        await handleTaskUpdate(agent, msg);
+      case 'agent.resolveTask':
+        await handleResolveTask(agent, msg);
         break;
-      case 'task.complete':
-        await handleTaskComplete(agent, msg);
-        break;
-      case 'agent.getTask':
-        handleGetTask(agent, msg);
-        break;
-      case 'agent.listTasks':
-        handleListTasks(agent, msg);
+      case 'agent.addBadge':
+        await handleAddBadge(agent, msg);
         break;
       case 'agent.clearSession':
         await handleClearSession(agent, msg);
-        break;
-      case 'agent.requestDigest':
-        await handleRequestDigest(agent, msg);
         break;
       default:
         sendError(ws, `Unknown message type: ${(msg as any).type}`);
@@ -1263,62 +884,31 @@ export async function startHub(): Promise<void> {
   const distPath = path.join(__dirname, '..', '..', 'dashboard', 'dist');
   app.use(express.static(distPath));
 
-  // ── REST: Rooms ────────────────────────────────────────────────
+  // ── REST: Channels ──────────────────────────────────────────────
 
-  app.get('/api/rooms', (_req, res) => {
-    const list = [...rooms.values()].map(({ id, name, createdAt, messages }) => ({
-      id,
-      name,
-      createdAt,
-      messageCount: messages.length,
-    }));
-    res.json(list);
+  app.get('/api/channels', (_req, res) => {
+    res.json([...channels]);
   });
 
-  app.post('/api/rooms', (req, res) => {
-    const { name } = req.body;
-    if (!name || typeof name !== 'string' || name.trim().length === 0) {
-      res.status(400).json({ error: 'Room name is required' });
+  app.get('/api/channels/:channelId/messages', (req, res) => {
+    const channelId = req.params.channelId;
+    if (!channels.has(channelId)) {
+      res.status(404).json({ error: 'Channel not found' });
       return;
     }
-    const id = generateId();
-    const room: Room = { id, name: name.trim(), messages: [], createdAt: new Date().toISOString() };
-    rooms.set(id, room);
-    broadcastToAllBrowsers({
-      type: 'roomCreated',
-      room: { id, name: room.name, createdAt: room.createdAt, messageCount: 0 },
-    });
-    res.status(201).json({ id, name: room.name, createdAt: room.createdAt });
-  });
-
-  app.get('/api/rooms/:roomId/messages', (req, res) => {
-    const room = rooms.get(req.params.roomId);
-    if (!room) {
-      res.status(404).json({ error: 'Room not found' });
-      return;
-    }
-    // Return in the format the dashboard frontend expects
-    const messages = room.messages.map((m) => ({
-      messageId: m.messageId,
-      roomId: m.roomId,
-      username: m.fromName,
-      text: m.content,
-      timestamp: m.timestamp,
-      source: m.source,
-      mentions: m.mentions,
-      mentionType: m.mentionType,
-      importance: m.importance,
-    }));
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
+    const afterMessageId = req.query.afterMessageId as string | undefined;
+    const messages = messageManager.getChannelMessages(channelId, { limit, afterMessageId });
     res.json(messages);
   });
 
-  app.post('/api/rooms/:roomId/messages', (req, res) => {
-    const room = rooms.get(req.params.roomId);
-    if (!room) {
-      res.status(404).json({ error: 'Room not found' });
+  app.post('/api/channels/:channelId/messages', async (req, res) => {
+    const channelId = req.params.channelId;
+    if (!channels.has(channelId)) {
+      res.status(404).json({ error: 'Channel not found' });
       return;
     }
-    const { username, text } = req.body;
+    const { username, text, threadId, metadata } = req.body;
     if (!username || !text) {
       res.status(400).json({ error: 'username and text are required' });
       return;
@@ -1327,34 +917,90 @@ export async function startHub(): Promise<void> {
     const content = (text as string).trim();
     const { mentions, mentionType } = parseMentions(content);
 
-    const chatMsg: ChatMessage = {
+    const message: Message = {
       messageId: generateId(),
-      roomId: room.id,
+      channelId,
+      threadId: threadId || undefined,
       fromPeerId: 'dashboard-user',
       fromName: (username as string).trim(),
       content,
-      metadata: undefined,
       timestamp: new Date().toISOString(),
       source: 'user',
       mentions: mentions.length > 0 ? mentions : undefined,
       mentionType,
+      badges: [],
+      metadata: metadata || undefined,
     };
-    room.messages.push(chatMsg);
-    enforceRoomMessageCap(room).catch((err) => logError('Error enforcing room message cap', err));
 
-    // Broadcast to agents in this room (with mention filtering)
-    broadcastRoomMessage(room.id, chatMsg);
+    await messageManager.addMessage(message);
+    broadcastChannelMessage(channelId, message);
 
-    res.status(201).json({
-      messageId: chatMsg.messageId,
-      roomId: chatMsg.roomId,
-      username: chatMsg.fromName,
-      text: chatMsg.content,
-      timestamp: chatMsg.timestamp,
-      source: chatMsg.source,
-      mentions: chatMsg.mentions,
-      mentionType: chatMsg.mentionType,
+    res.status(201).json(message);
+  });
+
+  app.get('/api/channels/:channelId/messages/:messageId/thread', (req, res) => {
+    const threadId = req.params.messageId;
+    const messages = messageManager.getThreadMessages(threadId);
+    res.json(messages);
+  });
+
+  app.post('/api/channels/:channelId/messages/:messageId/flag-task', async (req, res) => {
+    const messageId = req.params.messageId;
+    const { addedBy, filter } = req.body;
+
+    const meta = await messageManager.flagAsTask(
+      messageId,
+      addedBy || 'dashboard-user',
+      filter || undefined,
+    );
+
+    if (!meta) {
+      res.status(404).json({ error: 'Message not found' });
+      return;
+    }
+
+    const message = messageManager.getMessage(messageId);
+    if (message) {
+      broadcastToAllBrowsers({
+        type: 'message.updated',
+        messageId,
+        badges: message.badges,
+      });
+    }
+
+    res.json(meta);
+  });
+
+  app.post('/api/channels/:channelId/messages/:messageId/badges', async (req, res) => {
+    const messageId = req.params.messageId;
+    const { type: badgeType, value, label, addedBy } = req.body;
+
+    if (!badgeType || !value) {
+      res.status(400).json({ error: 'type and value are required' });
+      return;
+    }
+
+    const badge: Badge = {
+      type: badgeType,
+      value,
+      label: label || undefined,
+      addedBy: addedBy || 'dashboard-user',
+      addedAt: new Date().toISOString(),
+    };
+
+    const message = await messageManager.addBadge(messageId, badge);
+    if (!message) {
+      res.status(404).json({ error: 'Message not found' });
+      return;
+    }
+
+    broadcastToAllBrowsers({
+      type: 'message.badgeAdded',
+      messageId,
+      badge,
     });
+
+    res.json({ messageId, badge });
   });
 
   // ── REST: Peers ────────────────────────────────────────────────
@@ -1388,97 +1034,34 @@ export async function startHub(): Promise<void> {
 
   // ── REST: Tasks ────────────────────────────────────────────────
 
-  app.post('/api/tasks', async (req, res) => {
-    const { description, context, filter, roomId, creatorName } = req.body || {};
-    if (!description || !roomId) {
-      res.status(400).json({ error: 'description and roomId are required' });
-      return;
-    }
-    try {
-      const task = await taskManager.create({
-        roomId,
-        creatorId: 'dashboard-user',
-        creatorName: creatorName || 'Dashboard',
-        description,
-        context: context || undefined,
-        filter: filter || undefined,
-      });
-      const fullSummary = taskToSummary(task);
-      const redactedSummary = taskToSummary(task, { includeContext: false });
-      // Agents see only description (must claim to get context)
-      broadcastToRoomAgents(roomId, { type: 'task.created', task: redactedSummary });
-      // Dashboard sees full context
-      broadcastToRoomBrowsers(roomId, { type: 'task.created', task: fullSummary });
-
-      // Inject task as a chat message so agents discover it via message listeners
-      injectTaskMessage(task);
-
-      res.json(fullSummary);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to create task';
-      res.status(400).json({ error: message });
-    }
-  });
-
   app.get('/api/tasks', (req, res) => {
-    const filter: { status?: any; roomId?: string; assignedTo?: string } = {};
+    const filter: { status?: string; channelId?: string; claimantId?: string } = {};
     if (req.query.status) filter.status = req.query.status as string;
-    if (req.query.roomId) filter.roomId = req.query.roomId as string;
-    if (req.query.assignedTo) filter.assignedTo = req.query.assignedTo as string;
-    const tasks = taskManager.list(Object.keys(filter).length > 0 ? filter : undefined);
+    if (req.query.channelId) filter.channelId = req.query.channelId as string;
+    if (req.query.claimantId) filter.claimantId = req.query.claimantId as string;
+    const tasks = messageManager.listTasks(Object.keys(filter).length > 0 ? filter : undefined);
     res.json(tasks);
-  });
-
-  app.get('/api/tasks/:id', (req, res) => {
-    const task = taskManager.get(req.params.id);
-    if (!task) {
-      res.status(404).json({ error: 'Task not found' });
-      return;
-    }
-    res.json(task);
-  });
-
-  app.post('/api/tasks/:id/archive', async (req, res) => {
-    try {
-      const task = await taskManager.archive(req.params.id);
-      res.json(task);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to archive task';
-      res.status(400).json({ error: message });
-    }
   });
 
   // ── REST: Clear session ──────────────────────────────────────────
 
-  app.post('/api/rooms/:roomId/clear', async (req, res) => {
-    const room = rooms.get(req.params.roomId);
-    if (!room) {
-      res.status(404).json({ error: 'Room not found' });
+  app.post('/api/channels/:channelId/clear', (req, res) => {
+    const channelId = req.params.channelId;
+    if (!channels.has(channelId)) {
+      res.status(404).json({ error: 'Channel not found' });
       return;
     }
 
-    const clearMessages = req.body?.messages !== false;
-    const clearTasks = req.body?.tasks === true;
+    const messagesCleared = messageManager.clearChannel(channelId);
 
-    let messagesCleared = 0;
-    let tasksArchived = 0;
+    broadcastToAllBrowsers({
+      type: 'sessionCleared',
+      channelId,
+      clearedBy: 'dashboard',
+      messagesCleared,
+    });
 
-    if (clearMessages) {
-      messagesCleared = room.messages.length;
-      room.messages = [];
-      broadcastToRoomBrowsers(req.params.roomId, {
-        type: 'sessionCleared',
-        roomId: req.params.roomId,
-        clearedBy: 'dashboard',
-        messagesCleared,
-      });
-    }
-
-    if (clearTasks) {
-      tasksArchived = await taskManager.archiveTerminal(req.params.roomId);
-    }
-
-    res.json({ messagesCleared, tasksArchived });
+    res.json({ messagesCleared });
   });
 
   // ── REST: Permissions ────────────────────────────────────────────
@@ -1690,14 +1273,6 @@ end tell`;
     res.json({ launched: true, instanceId: instance.id, path: instance.path });
   });
 
-  // ── REST: Hub control ──────────────────────────────────────────────
-
-  app.post('/api/hub/shutdown', (_req, res) => {
-    res.json({ shutting_down: true });
-    // Delay slightly so the response is sent before shutdown
-    setTimeout(() => shutdown('API request'), 100);
-  });
-
   // ── API 404 — reject unmatched API routes before SPA fallback ──
 
   app.use('/api', (_req, res) => {
@@ -1742,7 +1317,7 @@ end tell`;
       agentWss.handleUpgrade(request, socket, head, (ws) => {
         agentWss.emit('connection', ws, request);
       });
-    } else if (pathname === '/ws') {
+    } else if (pathname === '/ws' || pathname === '/ws/browser') {
       browserWss.handleUpgrade(request, socket, head, (ws) => {
         browserWss.emit('connection', ws, request);
       });
@@ -1789,7 +1364,7 @@ end tell`;
             ws,
             status: 'available',
             statusDetail: undefined,
-            currentRoom: 'general',
+            currentChannel: 'general',
             connectedAt: new Date().toISOString(),
           };
 
@@ -1860,7 +1435,7 @@ end tell`;
 
   browserWss.on('connection', (ws: WebSocket) => {
     browserClients.add(ws);
-    browserRooms.set(ws, new Set());
+    browserChannels.set(ws, new Set());
 
     // Issue a session token for this dashboard connection
     const sessionToken = generateId();
@@ -1879,31 +1454,31 @@ end tell`;
 
       switch (data.type) {
         case 'join': {
-          const room = rooms.get(data.roomId as string);
-          if (!room) {
-            ws.send(JSON.stringify({ type: 'error', error: 'Room not found' }));
+          const channelId = data.channelId as string;
+          if (!channelId || !channels.has(channelId)) {
+            ws.send(JSON.stringify({ type: 'error', error: 'Channel not found' }));
             return;
           }
-          browserRooms.get(ws)!.add(data.roomId as string);
+          browserChannels.get(ws)!.add(channelId);
           if (!data.silent) {
-            broadcastToRoomBrowsers(data.roomId as string, {
+            broadcastToChannelBrowsers(channelId, {
               type: 'userJoined',
-              roomId: data.roomId,
+              channelId,
               username: data.username || 'Anonymous',
             });
           }
           break;
         }
         case 'message': {
-          const room = rooms.get(data.roomId as string);
-          if (!room || !data.username || !data.text) return;
+          const channelId = data.channelId as string;
+          if (!channelId || !channels.has(channelId) || !data.username || !data.text) return;
 
           const wsContent = (data.text as string).trim();
           const { mentions: wsMentions, mentionType: wsMentionType } = parseMentions(wsContent);
 
-          const chatMsg: ChatMessage = {
+          const chatMsg: Message = {
             messageId: generateId(),
-            roomId: room.id,
+            channelId,
             fromPeerId: 'dashboard-user',
             fromName: (data.username as string).trim(),
             content: wsContent,
@@ -1912,16 +1487,17 @@ end tell`;
             source: 'user',
             mentions: wsMentions.length > 0 ? wsMentions : undefined,
             mentionType: wsMentionType,
+            badges: [],
           };
-          room.messages.push(chatMsg);
-          enforceRoomMessageCap(room).catch((err) => logError('Error enforcing room message cap', err));
+
+          messageManager.addMessage(chatMsg).catch((err) => logError('Error persisting browser message', err));
 
           // Broadcast with mention filtering
-          broadcastRoomMessage(room.id, chatMsg);
+          broadcastChannelMessage(channelId, chatMsg);
           break;
         }
         case 'leave': {
-          browserRooms.get(ws)?.delete(data.roomId as string);
+          browserChannels.get(ws)?.delete(data.channelId as string);
           break;
         }
       }
@@ -1932,7 +1508,7 @@ end tell`;
       if (token) validTokens.delete(token);
       browserTokens.delete(ws);
       browserClients.delete(ws);
-      browserRooms.delete(ws);
+      // WeakMap entry for browserChannels is automatically GC'd
     });
 
     ws.on('error', (err) => {
@@ -1968,18 +1544,6 @@ end tell`;
     }
   }, HEARTBEAT_INTERVAL_MS);
 
-  // ── Pending permission sweep ──────────────────────────────────
-
-  const permissionSweepInterval = setInterval(() => {
-    const now = Date.now();
-    for (const [id, perm] of pendingPermissions) {
-      if (perm.status === 'pending' && now - new Date(perm.createdAt).getTime() > PERMISSION_TTL_MS) {
-        pendingPermissions.delete(id);
-        log(`Expired stale pending permission: ${id} (${perm.toolName})`);
-      }
-    }
-  }, PERMISSION_SWEEP_INTERVAL_MS);
-
   // ── Start listening ────────────────────────────────────────────
 
   const configPort = process.env.CROSSCHAT_DASHBOARD_PORT
@@ -2013,7 +1577,7 @@ end tell`;
   await writeDashboardLock(actualPort);
   log(`Hub started on port ${actualPort} (pid ${process.pid})`);
 
-  // Post startup event to the activity room
+  // Post startup event to the activity channel
   postActivity(`Hub started on port ${actualPort}`, 'important');
 
   // ── Graceful shutdown ──────────────────────────────────────────

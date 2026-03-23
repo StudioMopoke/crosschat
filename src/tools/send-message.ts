@@ -5,15 +5,16 @@ import type { AgentConnection } from '../hub/agent-connection.js';
 export function registerSendMessage(server: McpServer, agentConnection: AgentConnection): void {
   server.tool(
     'send_message',
-    'Send a message to your current room. All agents and dashboard users in the room will see it.',
+    'Send a message to the channel or a thread. All agents in the channel will see it (or thread participants if threadId is set).',
     {
       content: z.string().describe('The message text to send'),
-      metadata: z.record(z.unknown()).optional().describe('Optional structured metadata to attach (e.g., { "urgency": "high", "topic": "refactor" })'),
-      importance: z.enum(['important', 'comment', 'chitchat']).optional().describe('Message importance level: "important" for key updates, "comment" for normal discussion (default), "chitchat" for low-priority chatter'),
+      threadId: z.string().optional().describe('If set, send as a reply in this thread (the threadId is the messageId of the root message)'),
+      metadata: z.record(z.unknown()).optional().describe('Optional structured metadata to attach'),
+      importance: z.enum(['important', 'comment', 'chitchat']).optional().describe('Message importance level'),
     },
-    async ({ content, metadata, importance }) => {
+    async ({ content, threadId, metadata, importance }) => {
       try {
-        agentConnection.sendMessage(content, metadata, importance);
+        agentConnection.sendMessage(content, { threadId, metadata, importance });
 
         return {
           content: [

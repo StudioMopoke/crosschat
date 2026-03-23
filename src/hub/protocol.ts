@@ -3,7 +3,12 @@
  *
  * Defines all agent-to-server and server-to-agent message shapes as
  * discriminated unions keyed on the `type` field.
+ *
+ * v2: Unified messaging — rooms renamed to channels, tasks replaced by
+ * message badges, threads via threadId on messages.
  */
+
+import type { Badge, TaskFilter } from './message-manager.js';
 
 // ─── Shared types ────────────────────────────────────────────────
 
@@ -16,40 +21,11 @@ export interface PeerInfo {
   pid: number;
   status: AgentStatus;
   statusDetail?: string;
-  currentRoom: string;
+  currentChannel: string;
   connectedAt: string;
 }
 
-export type HubTaskStatus = 'open' | 'claimed' | 'in_progress' | 'completed' | 'failed' | 'archived';
-
-export interface TaskFilter {
-  agentId?: string;
-  workingDirReq?: string;
-  gitProject?: string;
-}
-
-export interface TaskNote {
-  noteId: string;
-  authorId: string;
-  authorName: string;
-  content: string;    // markdown
-  timestamp: string;
-}
-
-export interface TaskSummary {
-  taskId: string;
-  roomId: string;
-  creatorId: string;
-  creatorName: string;
-  description: string;
-  context?: string;
-  filter?: TaskFilter;
-  status: HubTaskStatus;
-  claimantId?: string;
-  claimantName?: string;
-  createdAt: string;
-  updatedAt: string;
-}
+export type MessageImportance = 'important' | 'comment' | 'chitchat';
 
 // ─── Agent-to-server messages ────────────────────────────────────
 
@@ -70,29 +46,17 @@ export interface AgentStatusMessage {
   type: 'agent.status';
   status: AgentStatus;
   detail?: string;
-  taskId?: string;
+  taskMessageId?: string;
 }
 
 export interface AgentDisconnectMessage {
   type: 'agent.disconnect';
 }
 
-export interface AgentJoinRoomMessage {
-  type: 'agent.joinRoom';
-  roomId: string;
-}
-
-export interface AgentCreateRoomMessage {
-  type: 'agent.createRoom';
-  roomId: string;
-  name?: string;
-}
-
-export type MessageImportance = 'important' | 'comment' | 'chitchat';
-
 export interface AgentSendMessageMessage {
   type: 'agent.sendMessage';
   content: string;
+  threadId?: string;
   metadata?: Record<string, unknown>;
   importance?: MessageImportance;
 }
@@ -102,66 +66,49 @@ export interface AgentListPeersMessage {
   requestId: string;
 }
 
-export interface TaskCreateMessage {
-  type: 'task.create';
-  requestId?: string;
-  description: string;
-  context?: string;
+export interface AgentGetMessagesMessage {
+  type: 'agent.getMessages';
+  requestId: string;
+  threadId?: string;
+  limit?: number;
+  afterMessageId?: string;
+}
+
+export interface AgentFlagTaskMessage {
+  type: 'agent.flagTask';
+  requestId: string;
+  messageId: string;
   filter?: TaskFilter;
 }
 
-export interface TaskClaimMessage {
-  type: 'task.claim';
-  requestId?: string;
-  taskId: string;
+export interface AgentClaimTaskMessage {
+  type: 'agent.claimTask';
+  requestId: string;
+  messageId: string;
 }
 
-export interface TaskAcceptMessage {
-  type: 'task.accept';
-  taskId: string;
-  claimantId: string;
-}
-
-export interface TaskUpdateMessage {
-  type: 'task.update';
-  taskId: string;
-  content: string;    // markdown
-  status?: HubTaskStatus;
-}
-
-export interface TaskCompleteMessage {
-  type: 'task.complete';
-  taskId: string;
-  result: string;     // markdown
+export interface AgentResolveTaskMessage {
+  type: 'agent.resolveTask';
+  requestId: string;
+  messageId: string;
   status: 'completed' | 'failed';
+  result: string;
   error?: string;
 }
 
-export interface AgentGetTaskMessage {
-  type: 'agent.getTask';
+export interface AgentAddBadgeMessage {
+  type: 'agent.addBadge';
   requestId: string;
-  taskId: string;
-}
-
-export interface AgentListTasksMessage {
-  type: 'agent.listTasks';
-  requestId: string;
-  status?: string;
-  roomId?: string;
-  assignedTo?: string;
+  messageId: string;
+  badgeType: string;
+  badgeValue: string;
+  label?: string;
 }
 
 export interface AgentClearSessionMessage {
   type: 'agent.clearSession';
   requestId: string;
-  messages?: boolean;   // clear messages from current room (default true)
-  tasks?: boolean;      // archive completed/failed tasks (default false)
-}
-
-export interface AgentRequestDigestMessage {
-  type: 'agent.requestDigest';
-  requestId: string;
-  clearMessages?: boolean;  // clear room messages after capturing for digest (default false)
+  messages?: boolean;
 }
 
 export type AgentMessage =
@@ -169,19 +116,14 @@ export type AgentMessage =
   | AgentHeartbeatMessage
   | AgentStatusMessage
   | AgentDisconnectMessage
-  | AgentJoinRoomMessage
-  | AgentCreateRoomMessage
   | AgentSendMessageMessage
   | AgentListPeersMessage
-  | TaskCreateMessage
-  | TaskClaimMessage
-  | TaskAcceptMessage
-  | TaskUpdateMessage
-  | TaskCompleteMessage
-  | AgentGetTaskMessage
-  | AgentListTasksMessage
-  | AgentClearSessionMessage
-  | AgentRequestDigestMessage;
+  | AgentGetMessagesMessage
+  | AgentFlagTaskMessage
+  | AgentClaimTaskMessage
+  | AgentResolveTaskMessage
+  | AgentAddBadgeMessage
+  | AgentClearSessionMessage;
 
 // ─── Server-to-agent messages ────────────────────────────────────
 
@@ -197,92 +139,76 @@ export interface PeersMessage {
   peers: PeerInfo[];
 }
 
-export interface RoomJoinedMessage {
-  type: 'room.joined';
-  roomId: string;
-  name: string;
-}
-
-export interface RoomCreatedMessage {
-  type: 'room.created';
-  roomId: string;
-  name: string;
-}
-
-export interface RoomMessageMessage {
-  type: 'room.message';
-  roomId: string;
+export interface ChannelMessageMessage {
+  type: 'channel.message';
+  channelId: string;
   messageId: string;
+  threadId?: string;
   fromPeerId: string;
   fromName: string;
   content: string;
   metadata?: Record<string, unknown>;
   timestamp: string;
   source: 'agent' | 'user' | 'system';
-  mentions?: string[];       // mentioned agent names
+  mentions?: string[];
   mentionType?: 'direct' | 'here' | 'broadcast';
   importance?: MessageImportance;
+  badges: Badge[];
 }
 
-export interface TaskCreatedMessage {
-  type: 'task.created';
-  requestId?: string;
-  task: TaskSummary;
+export interface MessageBadgeAddedMessage {
+  type: 'message.badgeAdded';
+  messageId: string;
+  badge: Badge;
+}
+
+export interface MessageUpdatedMessage {
+  type: 'message.updated';
+  messageId: string;
+  badges: Badge[];
+}
+
+export interface TaskFlaggedMessage {
+  type: 'task.flagged';
+  requestId: string;
+  messageId: string;
+  badges: Badge[];
 }
 
 export interface TaskClaimedMessage {
   type: 'task.claimed';
-  requestId?: string;
-  taskId: string;
+  requestId: string;
+  messageId: string;
   claimantId: string;
   claimantName: string;
-  context?: string;
 }
 
-export interface TaskClaimAcceptedMessage {
-  type: 'task.claimAccepted';
-  taskId: string;
-  assignedTo: string;
-}
-
-export interface TaskUpdatedMessage {
-  type: 'task.updated';
-  taskId: string;
-  note: TaskNote;
-}
-
-export interface TaskCompletedMessage {
-  type: 'task.completed';
-  taskId: string;
+export interface TaskResolvedMessage {
+  type: 'task.resolved';
+  requestId: string;
+  messageId: string;
   status: 'completed' | 'failed';
-  result?: string;
+  result: string;
 }
 
-export interface TaskDetailMessage {
-  type: 'task.detail';
+export interface BadgeAddedMessage {
+  type: 'badge.added';
   requestId: string;
-  task: TaskSummary & { notes: TaskNote[]; result?: string; error?: string };
+  messageId: string;
+  badge: Badge;
 }
 
-export interface TasksMessage {
-  type: 'tasks';
+export interface MessagesResponseMessage {
+  type: 'messages';
   requestId: string;
-  tasks: TaskSummary[];
+  messages: ChannelMessageMessage[];
+  threadId?: string;
 }
 
 export interface SessionClearedMessage {
   type: 'session.cleared';
   requestId: string;
   messagesCleared: number;
-  tasksArchived: number;
-}
-
-export interface DigestRequestedMessage {
-  type: 'digest.requested';
-  requestId: string;
-  taskId: string;
-  messageCount: number;
-  messagesCleared: boolean;
 }
 
 export interface ErrorMessage {
@@ -294,18 +220,15 @@ export interface ErrorMessage {
 export type ServerMessage =
   | RegisteredMessage
   | PeersMessage
-  | RoomJoinedMessage
-  | RoomCreatedMessage
-  | RoomMessageMessage
-  | TaskCreatedMessage
+  | ChannelMessageMessage
+  | MessageBadgeAddedMessage
+  | MessageUpdatedMessage
+  | TaskFlaggedMessage
   | TaskClaimedMessage
-  | TaskClaimAcceptedMessage
-  | TaskUpdatedMessage
-  | TaskCompletedMessage
-  | TaskDetailMessage
-  | TasksMessage
+  | TaskResolvedMessage
+  | BadgeAddedMessage
+  | MessagesResponseMessage
   | SessionClearedMessage
-  | DigestRequestedMessage
   | ErrorMessage;
 
 // ─── Helpers ─────────────────────────────────────────────────────

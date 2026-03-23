@@ -1,5 +1,7 @@
 // === Messages ===
 
+import type { Badge } from './hub/message-manager.js';
+
 export type MessageImportance = 'important' | 'comment' | 'chitchat';
 
 export interface PeerMessage {
@@ -11,10 +13,10 @@ export interface PeerMessage {
   sentAt: string;
   receivedAt: string;
   read: boolean;
-  relatedTaskId?: string;
-  replyToMessageId?: string;
-  type?: 'message' | 'task_result' | 'task_delegated';
-  mentions?: string[];       // mentioned agent names
+  threadId?: string;
+  type?: 'message' | 'badge_update';
+  mentions?: string[];
   mentionType?: 'direct' | 'here' | 'broadcast';
   importance?: MessageImportance;
+  badges?: Badge[];
 }
