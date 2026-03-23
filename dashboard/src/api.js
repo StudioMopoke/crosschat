@@ -1,25 +1,51 @@
 // Uses relative URLs so it works when served from the same origin as the dashboard server
 const API_BASE = '/api';
 
-export async function fetchRooms() {
-  const res = await fetch(`${API_BASE}/rooms`);
-  if (!res.ok) throw new Error('Failed to fetch rooms');
+export async function fetchChannels() {
+  const res = await fetch(`${API_BASE}/channels`);
+  if (!res.ok) throw new Error('Failed to fetch channels');
   return res.json();
 }
 
-export async function createRoom(name) {
-  const res = await fetch(`${API_BASE}/rooms`, {
+export async function fetchMessages(channelId) {
+  const res = await fetch(`${API_BASE}/channels/${channelId}/messages`);
+  if (!res.ok) throw new Error('Failed to fetch messages');
+  return res.json();
+}
+
+export async function postMessage(channelId, username, text, threadId) {
+  const res = await fetch(`${API_BASE}/channels/${channelId}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ username, text, threadId: threadId || undefined }),
   });
-  if (!res.ok) throw new Error('Failed to create room');
+  if (!res.ok) throw new Error('Failed to send message');
   return res.json();
 }
 
-export async function fetchMessages(roomId) {
-  const res = await fetch(`${API_BASE}/rooms/${roomId}/messages`);
-  if (!res.ok) throw new Error('Failed to fetch messages');
+export async function fetchThreadMessages(channelId, messageId) {
+  const res = await fetch(`${API_BASE}/channels/${channelId}/messages/${messageId}/thread`);
+  if (!res.ok) throw new Error('Failed to fetch thread');
+  return res.json();
+}
+
+export async function flagAsTask(channelId, messageId, addedBy) {
+  const res = await fetch(`${API_BASE}/channels/${channelId}/messages/${messageId}/flag-task`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ addedBy }),
+  });
+  if (!res.ok) throw new Error('Failed to flag as task');
+  return res.json();
+}
+
+export async function addBadge(channelId, messageId, type, value, label, addedBy) {
+  const res = await fetch(`${API_BASE}/channels/${channelId}/messages/${messageId}/badges`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type, value, label, addedBy }),
+  });
+  if (!res.ok) throw new Error('Failed to add badge');
   return res.json();
 }
 
@@ -29,25 +55,9 @@ export async function fetchPeers() {
   return res.json();
 }
 
-export async function postMessage(roomId, username, text) {
-  const res = await fetch(`${API_BASE}/rooms/${roomId}/messages`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, text }),
-  });
-  if (!res.ok) throw new Error('Failed to send message');
-  return res.json();
-}
-
 export async function fetchTasks() {
   const res = await fetch(`${API_BASE}/tasks`);
   if (!res.ok) throw new Error('Failed to fetch tasks');
-  return res.json();
-}
-
-export async function fetchTask(taskId) {
-  const res = await fetch(`${API_BASE}/tasks/${taskId}`);
-  if (!res.ok) throw new Error('Failed to fetch task');
   return res.json();
 }
 
@@ -117,26 +127,8 @@ export async function shutdownHub() {
   return res.json();
 }
 
-export async function createTask(roomId, description, context, filter, creatorName) {
-  const res = await fetch(`${API_BASE}/tasks`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ roomId, description, context: context || undefined, filter: filter || undefined, creatorName }),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || 'Failed to create task');
-  }
-  return res.json();
-}
-
-export async function archiveTask(taskId) {
-  const res = await fetch(`${API_BASE}/tasks/${taskId}/archive`, {
-    method: 'POST',
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || 'Failed to archive task');
-  }
+export async function clearChannel(channelId) {
+  const res = await fetch(`${API_BASE}/channels/${channelId}/clear`, { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to clear channel');
   return res.json();
 }
