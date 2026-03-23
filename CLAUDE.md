@@ -1,6 +1,6 @@
 # CrossChat — Claude Code Development Guide
 
-CrossChat is an MCP server for inter-instance Claude Code collaboration. It provides a hub-based messaging system where Claude Code instances connect via WebSocket and communicate through rooms.
+CrossChat is an MCP server for inter-instance Claude Code collaboration. It provides a hub-based unified messaging system where Claude Code instances connect via WebSocket and communicate through a persistent channel with threads and badges.
 
 ## Build & Run
 
@@ -11,13 +11,14 @@ CrossChat is an MCP server for inter-instance Claude Code collaboration. It prov
 
 ## Project Structure
 
-- `src/hub/` — Hub server: WebSocket connections, protocol, task manager
-- `src/tools/` — MCP tool implementations (16 tools)
+- `src/hub/` — Hub server: WebSocket connections, protocol, message manager
+- `src/hub/message-manager.ts` — Persistent message storage, threads, badges, task operations
+- `src/tools/` — MCP tool implementations (10 tools)
 - `src/server.ts` — MCP server setup and tool registration
 - `src/types.ts` — Shared type definitions
 - `src/prompts.ts` — MCP prompt definitions
 - `src/lifecycle.ts` — Instance lifecycle management
-- `src/stores/` — Message store
+- `src/stores/` — Client-side message store
 - `src/util/` — ID generation, logging, PID management
 - `src/index.ts` — Entry point
 - `dashboard/` — Vite frontend dashboard

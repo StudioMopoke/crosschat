@@ -112,14 +112,14 @@
   margin: 0;
 }
 
-.room-list {
+.channel-list {
   list-style: none;
   flex: 1;
   overflow-y: auto;
   padding: 8px;
 }
 
-.room-item {
+.channel-item {
   padding: 10px 12px;
   border-radius: 6px;
   cursor: pointer;
@@ -127,38 +127,38 @@
   margin-bottom: 2px;
 }
 
-.room-item:hover {
+.channel-item:hover {
   background: var(--bg-tertiary);
 }
 
-.room-item.active {
+.channel-item.active {
   background: var(--accent-light);
   color: var(--text-bright);
 }
 
-.room-item.empty {
+.channel-item.empty {
   color: var(--text-muted);
   font-style: italic;
   cursor: default;
 }
 
-.room-item.empty:hover {
+.channel-item.empty:hover {
   background: none;
 }
 
-.room-name {
+.channel-name {
   font-size: 14px;
   font-weight: 500;
 }
 
-.create-room-form {
+.create-channel-form {
   padding: 12px;
   border-top: 1px solid var(--border);
   display: flex;
   gap: 6px;
 }
 
-.create-room-form input {
+.create-channel-form input {
   flex: 1;
   padding: 8px 10px;
   background: var(--bg-tertiary);
@@ -168,11 +168,11 @@
   font-size: 13px;
 }
 
-.create-room-form input:focus {
+.create-channel-form input:focus {
   border-color: var(--accent);
 }
 
-.create-room-form button {
+.create-channel-form button {
   padding: 8px 14px;
   background: var(--accent);
   color: white;
@@ -182,11 +182,11 @@
   line-height: 1;
 }
 
-.create-room-form button:hover:not(:disabled) {
+.create-channel-form button:hover:not(:disabled) {
   background: var(--accent-hover);
 }
 
-.create-room-form button:disabled {
+.create-channel-form button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
@@ -1410,4 +1410,102 @@
 .permission-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* ── Message Badges ────────────────────────────────── */
+
+.message-badges {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.badge-task {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.badge-task[data-value="completed"] {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.3);
+}
+
+.badge-task[data-value="failed"] {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.badge-importance {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.badge-importance[data-value="normal"] {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+  border-color: rgba(148, 163, 184, 0.3);
+}
+
+.badge-importance[data-value="low"] {
+  background: rgba(148, 163, 184, 0.1);
+  color: #64748b;
+  border-color: rgba(148, 163, 184, 0.2);
+}
+
+.badge-question {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.3);
+}
+
+.badge-git-commit {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.badge-project {
+  background: rgba(251, 146, 60, 0.15);
+  color: #fb923c;
+  border: 1px solid rgba(251, 146, 60, 0.3);
+}
+
+.badge-permission {
+  background: rgba(250, 204, 21, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(250, 204, 21, 0.3);
+}
+
+/* ── Thread indicator ──────────────────────────────── */
+
+.thread-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--accent);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.thread-indicator:hover {
+  background: var(--bg-tertiary);
 }
