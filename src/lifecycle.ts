@@ -12,7 +12,7 @@ import { MessageStore } from './stores/message-store.js';
 import { AgentConnection } from './hub/agent-connection.js';
 import { createMcpServer } from './server.js';
 import type { PeerMessage } from './types.js';
-import type { RoomMessageMessage } from './hub/protocol.js';
+import type { ChannelMessageMessage, MessageBadgeAddedMessage } from './hub/protocol.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -34,11 +34,6 @@ interface DashboardLock {
   startedAt: string;
 }
 
-/**
- * Read and validate the dashboard lock file.
- * Returns the lock data if the file exists and the process is alive,
- * otherwise cleans up the stale lock and returns null.
- */
 async function readDashboardLock(): Promise<DashboardLock | null> {
   try {
     const data = await fs.readFile(DASHBOARD_LOCK_FILE, 'utf-8');
@@ -46,7 +41,6 @@ async function readDashboardLock(): Promise<DashboardLock | null> {
     if (isProcessAlive(lock.pid)) {
       return lock;
     }
-    // Stale lock — remove it
     await fs.unlink(DASHBOARD_LOCK_FILE).catch(() => {});
     return null;
   } catch {
@@ -54,33 +48,18 @@ async function readDashboardLock(): Promise<DashboardLock | null> {
   }
 }
 
-/**
- * Resolve the path to hub-main.js, checking both possible locations
- * (project root dist/ and co-located dist/).
- */
 async function resolveHubMainPath(): Promise<string> {
-  // Try the co-located path first (when running from dist/)
   try {
     await fs.access(HUB_MAIN_PATH_ALT);
     return HUB_MAIN_PATH_ALT;
-  } catch {
-    // Fall through
-  }
-  // Try the project-root path (when running from src/ during dev)
+  } catch { /* fall through */ }
   try {
     await fs.access(HUB_MAIN_PATH);
     return HUB_MAIN_PATH;
-  } catch {
-    // Fall through
-  }
-  // Default to the co-located path and let spawn fail with a clear error
+  } catch { /* fall through */ }
   return HUB_MAIN_PATH_ALT;
 }
 
-/**
- * Spawn the hub server as a detached child process.
- * The hub writes its own lock file once ready.
- */
 async function spawnHub(): Promise<void> {
   const hubPath = await resolveHubMainPath();
   log(`Spawning hub: node ${hubPath}`);
@@ -93,10 +72,6 @@ async function spawnHub(): Promise<void> {
   child.unref();
 }
 
-/**
- * Wait for the hub lock file to appear with a valid port.
- * Polls every LOCK_POLL_INTERVAL_MS up to LOCK_POLL_TIMEOUT_MS.
- */
 async function waitForHubLock(): Promise<DashboardLock> {
   const deadline = Date.now() + LOCK_POLL_TIMEOUT_MS;
 
@@ -114,15 +89,9 @@ async function waitForHubLock(): Promise<DashboardLock> {
   );
 }
 
-/**
- * Ensure the hub is running and return its port.
- * If no live hub is detected, spawns one and waits for it to be ready.
- */
 async function ensureHub(): Promise<DashboardLock> {
-  // Check for an existing running hub
   const existingLock = await readDashboardLock();
   if (existingLock) {
-    // Version mismatch — restart the hub so it serves the current build
     if (existingLock.version && existingLock.version !== pkg.version) {
       log(
         `Hub version mismatch: running v${existingLock.version}, we are v${pkg.version}. ` +
@@ -130,12 +99,8 @@ async function ensureHub(): Promise<DashboardLock> {
       );
       try {
         process.kill(existingLock.pid, 'SIGTERM');
-        // Give the old hub a moment to shut down and clean up its lock file
         await new Promise((resolve) => setTimeout(resolve, 1_000));
-      } catch {
-        // Process already gone — that's fine
-      }
-      // Remove stale lock if the old hub didn't clean it up
+      } catch { /* Process already gone */ }
       await fs.unlink(DASHBOARD_LOCK_FILE).catch(() => {});
     } else {
       log(`Hub already running on port ${existingLock.port} (pid ${existingLock.pid})`);
@@ -143,7 +108,6 @@ async function ensureHub(): Promise<DashboardLock> {
     }
   }
 
-  // No hub running (or old version was stopped) — spawn one
   await spawnHub();
   const lock = await waitForHubLock();
   log(`Hub started on port ${lock.port} (pid ${lock.pid})`);
@@ -177,9 +141,8 @@ export async function startServer(): Promise<void> {
   // 3. Create the local message store (bridges hub messages for MCP tool access)
   const messageStore = new MessageStore();
 
-  // 4. Bridge hub room messages into the local MessageStore
-  agentConnection.onMessage((msg: RoomMessageMessage) => {
-    // Skip messages from ourselves to avoid echo
+  // 4. Bridge hub channel messages into the local MessageStore
+  agentConnection.onMessage((msg: ChannelMessageMessage) => {
     if (msg.fromPeerId === peerId) return;
 
     const peerMessage: PeerMessage = {
@@ -192,51 +155,29 @@ export async function startServer(): Promise<void> {
       receivedAt: new Date().toISOString(),
       read: false,
       type: 'message',
+      threadId: msg.threadId,
       mentions: msg.mentions,
       mentionType: msg.mentionType,
       importance: msg.importance,
+      badges: msg.badges,
     };
     messageStore.add(peerMessage);
   });
 
-  // 5. Bridge task events into the MessageStore as informational messages
-  agentConnection.onTaskEvent((evt) => {
-    let content: string;
-    let type: PeerMessage['type'] = 'message';
-
-    switch (evt.type) {
-      case 'task.created':
-        content = `[TASK CREATED] ${evt.task.description} (taskId: ${evt.task.taskId})`;
-        type = 'task_delegated';
-        break;
-      case 'task.claimed':
-        content = `[TASK CLAIMED] Task ${evt.taskId} claimed by ${evt.claimantName} (${evt.claimantId})`;
-        break;
-      case 'task.claimAccepted':
-        content = `[TASK ACCEPTED] You have been assigned task ${evt.taskId}`;
-        break;
-      case 'task.updated':
-        content = `[TASK UPDATED] Task ${evt.taskId}: ${evt.note.content.slice(0, 200)}`;
-        break;
-      case 'task.completed':
-        content = `[TASK ${evt.status === 'completed' ? 'COMPLETED' : 'FAILED'}] Task ${evt.taskId}${evt.result ? `: ${evt.result.slice(0, 200)}` : ''}`;
-        type = 'task_result';
-        break;
-      default:
-        return;
-    }
-
-    const taskMessage: PeerMessage = {
+  // 5. Bridge badge events into the MessageStore
+  agentConnection.onBadge((evt: MessageBadgeAddedMessage) => {
+    const badgeMessage: PeerMessage = {
       messageId: generateId(),
-      fromPeerId: 'hub',
-      fromName: 'CrossChat Hub',
-      content,
+      fromPeerId: 'system',
+      fromName: 'CrossChat',
+      content: `[BADGE] ${evt.badge.type}:${evt.badge.value} on message ${evt.messageId}`,
       sentAt: new Date().toISOString(),
       receivedAt: new Date().toISOString(),
       read: false,
-      type,
+      type: 'badge_update',
+      metadata: { targetMessageId: evt.messageId, badge: evt.badge },
     };
-    messageStore.add(taskMessage);
+    messageStore.add(badgeMessage);
   });
 
   // 6. Connect to the hub

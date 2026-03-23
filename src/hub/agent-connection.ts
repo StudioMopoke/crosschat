@@ -12,35 +12,24 @@ import {
   type AgentStatus,
   type PeerInfo,
   type PeersMessage,
-  type RoomMessageMessage,
-  type SessionClearedMessage,
-  type TaskCreatedMessage,
+  type ChannelMessageMessage,
+  type MessageBadgeAddedMessage,
   type TaskClaimedMessage,
-  type TaskClaimAcceptedMessage,
-  type TaskUpdatedMessage,
-  type TaskCompletedMessage,
-  type TaskFilter,
-  type HubTaskStatus,
-  type TaskDetailMessage,
-  type TasksMessage,
-  type TaskSummary,
-  type TaskNote,
+  type TaskFlaggedMessage,
+  type TaskResolvedMessage,
+  type MessagesResponseMessage,
+  type SessionClearedMessage,
+  type BadgeAddedMessage,
   type MessageImportance,
 } from './protocol.js';
+import type { Badge, TaskFilter } from './message-manager.js';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 
-type TaskEvent =
-  | TaskCreatedMessage
-  | TaskClaimedMessage
-  | TaskClaimAcceptedMessage
-  | TaskUpdatedMessage
-  | TaskCompletedMessage;
-
-type MessageCallback = (msg: RoomMessageMessage) => void;
-type TaskEventCallback = (evt: TaskEvent) => void;
+type MessageCallback = (msg: ChannelMessageMessage) => void;
+type BadgeCallback = (msg: MessageBadgeAddedMessage) => void;
 type VoidCallback = () => void;
 
 interface PendingRequest<T> {
@@ -62,12 +51,12 @@ export class AgentConnection {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
   private stopped = false;
-  private currentRoomId = 'general';
+  private currentChannelId = 'general';
 
   private pendingRequests = new Map<string, PendingRequest<unknown>>();
 
   private messageCallbacks: MessageCallback[] = [];
-  private taskEventCallbacks: TaskEventCallback[] = [];
+  private badgeCallbacks: BadgeCallback[] = [];
   private connectedCallbacks: VoidCallback[] = [];
   private disconnectedCallbacks: VoidCallback[] = [];
 
@@ -80,7 +69,6 @@ export class AgentConnection {
 
   // ─── Connection lifecycle ──────────────────────────────────────
 
-  /** Open the WebSocket connection to the hub and send registration. */
   connect(): void {
     this.stopped = false;
     this.doConnect();
@@ -102,7 +90,6 @@ export class AgentConnection {
       log(`Agent connection established on port ${this.port}`);
       this.reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
 
-      // Register with the hub
       this.send({
         type: 'agent.register',
         peerId: this.peerId,
@@ -115,7 +102,7 @@ export class AgentConnection {
       this.startHeartbeat();
 
       for (const cb of this.connectedCallbacks) {
-        try { cb(); } catch { /* swallow callback errors */ }
+        try { cb(); } catch { /* swallow */ }
       }
     });
 
@@ -133,7 +120,7 @@ export class AgentConnection {
       this.stopHeartbeat();
 
       for (const cb of this.disconnectedCallbacks) {
-        try { cb(); } catch { /* swallow callback errors */ }
+        try { cb(); } catch { /* swallow */ }
       }
 
       this.scheduleReconnect();
@@ -141,14 +128,11 @@ export class AgentConnection {
 
     this.ws.on('error', (err) => {
       logError('Agent connection WS error', err);
-      // 'close' fires after 'error', which triggers reconnect
     });
   }
 
-  /** Gracefully close the connection without reconnecting. */
   disconnect(): void {
     this.stopped = true;
-
     this.stopHeartbeat();
 
     if (this.reconnectTimer) {
@@ -156,7 +140,6 @@ export class AgentConnection {
       this.reconnectTimer = null;
     }
 
-    // Reject all pending requests
     for (const [id, pending] of this.pendingRequests) {
       clearTimeout(pending.timer);
       pending.reject(new Error('Connection closed'));
@@ -164,7 +147,6 @@ export class AgentConnection {
     }
 
     if (this.ws) {
-      // Send disconnect notice before closing
       try {
         this.send({ type: 'agent.disconnect' });
       } catch { /* best-effort */ }
@@ -173,223 +155,96 @@ export class AgentConnection {
     }
   }
 
-  /** Whether the underlying WebSocket is currently open. */
   get connected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
   }
 
   // ─── Outgoing message helpers ──────────────────────────────────
 
-  /** Send a message to the agent's current room. */
-  sendMessage(content: string, metadata?: Record<string, unknown>, importance?: MessageImportance): void {
-    this.send({ type: 'agent.sendMessage', content, metadata, importance });
+  sendMessage(content: string, opts?: {
+    threadId?: string;
+    metadata?: Record<string, unknown>;
+    importance?: MessageImportance;
+  }): void {
+    this.send({
+      type: 'agent.sendMessage',
+      content,
+      threadId: opts?.threadId,
+      metadata: opts?.metadata,
+      importance: opts?.importance,
+    });
   }
 
-  /** Update this agent's availability status. */
-  setStatus(status: AgentStatus, detail?: string, taskId?: string): void {
-    this.send({ type: 'agent.status', status, detail, taskId });
+  setStatus(status: AgentStatus, detail?: string, taskMessageId?: string): void {
+    this.send({ type: 'agent.status', status, detail, taskMessageId });
   }
 
-  /** Get the current room ID. */
-  getCurrentRoom(): string {
-    return this.currentRoomId;
+  getCurrentChannel(): string {
+    return this.currentChannelId;
   }
 
-  /** Join a room (implicitly leaves the current room). */
-  joinRoom(roomId: string): void {
-    this.send({ type: 'agent.joinRoom', roomId });
-  }
-
-  /** Create a new room on the server. */
-  createRoom(roomId: string, name?: string): void {
-    this.send({ type: 'agent.createRoom', roomId, name });
-  }
-
-  /**
-   * Request the list of connected peers from the hub.
-   * Returns a Promise that resolves when the server responds.
-   */
   listPeers(): Promise<PeerInfo[]> {
     const requestId = generateId();
     this.send({ type: 'agent.listPeers', requestId });
-
-    return new Promise<PeerInfo[]>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(requestId);
-        reject(new Error('listPeers request timed out'));
-      }, 10_000);
-      timer.unref();
-
-      this.pendingRequests.set(requestId, {
-        resolve: resolve as (value: unknown) => void,
-        reject,
-        timer,
-      });
-    });
+    return this.createPendingRequest<PeerInfo[]>(requestId, 'listPeers');
   }
 
-  /** Create a task in the current room. */
-  createTask(description: string, context?: string, filter?: TaskFilter): Promise<TaskSummary> {
-    const requestId = generateId();
-    this.send({ type: 'task.create', requestId, description, context, filter });
-
-    return new Promise<TaskSummary>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(requestId);
-        reject(new Error('createTask request timed out'));
-      }, 10_000);
-      timer.unref();
-
-      this.pendingRequests.set(requestId, {
-        resolve: resolve as (value: unknown) => void,
-        reject,
-        timer,
-      });
-    });
-  }
-
-  /** Bid on an open task. Returns context on success, rejects if already claimed. */
-  claimTask(taskId: string): Promise<{ taskId: string; context?: string }> {
-    const requestId = generateId();
-    this.send({ type: 'task.claim', requestId, taskId });
-
-    return new Promise<{ taskId: string; context?: string }>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(requestId);
-        reject(new Error('claimTask request timed out'));
-      }, 10_000);
-      timer.unref();
-
-      this.pendingRequests.set(requestId, {
-        resolve: resolve as (value: unknown) => void,
-        reject,
-        timer,
-      });
-    });
-  }
-
-  /** List tasks with optional filters. Returns a Promise. */
-  listTasks(filter?: { status?: string; roomId?: string; assignedTo?: string }): Promise<{ tasks: TaskSummary[] }> {
-    const requestId = generateId();
-    this.send({ type: 'agent.listTasks', requestId, ...filter });
-
-    return new Promise<{ tasks: TaskSummary[] }>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(requestId);
-        reject(new Error('listTasks request timed out'));
-      }, 10_000);
-      timer.unref();
-
-      this.pendingRequests.set(requestId, {
-        resolve: resolve as (value: unknown) => void,
-        reject,
-        timer,
-      });
-    });
-  }
-
-  /** Get full task details including notes. Returns a Promise. */
-  getTask(taskId: string): Promise<TaskSummary & { notes: TaskNote[]; result?: string; error?: string }> {
-    type TaskDetail = TaskSummary & { notes: TaskNote[]; result?: string; error?: string };
-    const requestId = generateId();
-    this.send({ type: 'agent.getTask', requestId, taskId });
-
-    return new Promise<TaskDetail>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(requestId);
-        reject(new Error('getTask request timed out'));
-      }, 10_000);
-      timer.unref();
-
-      this.pendingRequests.set(requestId, {
-        resolve: resolve as (value: unknown) => void,
-        reject,
-        timer,
-      });
-    });
-  }
-
-  /** Accept a claim on a task you created. */
-  acceptClaim(taskId: string, claimantId: string): void {
-    this.send({ type: 'task.accept', taskId, claimantId });
-  }
-
-  /** Append a progress note to a task (supports markdown). */
-  updateTask(taskId: string, content: string, status?: HubTaskStatus): void {
-    this.send({ type: 'task.update', taskId, content, status });
-  }
-
-  /** Mark a task as completed or failed with a result blob. */
-  completeTask(taskId: string, result: string, status: 'completed' | 'failed', error?: string): void {
-    this.send({ type: 'task.complete', taskId, result, status, error });
-  }
-
-  /** Clear session state: messages from current room and optionally archive completed tasks. */
-  clearSession(opts?: { messages?: boolean; tasks?: boolean }): Promise<{ messagesCleared: number; tasksArchived: number }> {
+  getMessages(opts?: { threadId?: string; limit?: number; afterMessageId?: string }): Promise<ChannelMessageMessage[]> {
     const requestId = generateId();
     this.send({
-      type: 'agent.clearSession',
+      type: 'agent.getMessages',
       requestId,
-      messages: opts?.messages,
-      tasks: opts?.tasks,
+      threadId: opts?.threadId,
+      limit: opts?.limit,
+      afterMessageId: opts?.afterMessageId,
     });
-
-    return new Promise<{ messagesCleared: number; tasksArchived: number }>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(requestId);
-        reject(new Error('clearSession request timed out'));
-      }, 10_000);
-      timer.unref();
-
-      this.pendingRequests.set(requestId, {
-        resolve: resolve as (value: unknown) => void,
-        reject,
-        timer,
-      });
-    });
+    return this.createPendingRequest<ChannelMessageMessage[]>(requestId, 'getMessages');
   }
 
-  requestDigest(opts?: { clearMessages?: boolean }): Promise<{ taskId: string; messageCount: number; messagesCleared: boolean }> {
+  flagTask(messageId: string, filter?: TaskFilter): Promise<{ messageId: string; badges: Badge[] }> {
     const requestId = generateId();
-    this.send({
-      type: 'agent.requestDigest',
-      requestId,
-      clearMessages: opts?.clearMessages,
-    });
+    this.send({ type: 'agent.flagTask', requestId, messageId, filter });
+    return this.createPendingRequest<{ messageId: string; badges: Badge[] }>(requestId, 'flagTask');
+  }
 
-    return new Promise<{ taskId: string; messageCount: number; messagesCleared: boolean }>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(requestId);
-        reject(new Error('requestDigest request timed out'));
-      }, 10_000);
-      timer.unref();
+  claimTask(messageId: string): Promise<{ messageId: string; claimantId: string }> {
+    const requestId = generateId();
+    this.send({ type: 'agent.claimTask', requestId, messageId });
+    return this.createPendingRequest<{ messageId: string; claimantId: string }>(requestId, 'claimTask');
+  }
 
-      this.pendingRequests.set(requestId, {
-        resolve: resolve as (value: unknown) => void,
-        reject,
-        timer,
-      });
-    });
+  resolveTask(messageId: string, status: 'completed' | 'failed', result: string, error?: string): Promise<{ messageId: string; status: string }> {
+    const requestId = generateId();
+    this.send({ type: 'agent.resolveTask', requestId, messageId, status, result, error });
+    return this.createPendingRequest<{ messageId: string; status: string }>(requestId, 'resolveTask');
+  }
+
+  addBadge(messageId: string, badgeType: string, badgeValue: string, label?: string): Promise<{ messageId: string; badge: Badge }> {
+    const requestId = generateId();
+    this.send({ type: 'agent.addBadge', requestId, messageId, badgeType, badgeValue, label });
+    return this.createPendingRequest<{ messageId: string; badge: Badge }>(requestId, 'addBadge');
+  }
+
+  clearSession(opts?: { messages?: boolean }): Promise<{ messagesCleared: number }> {
+    const requestId = generateId();
+    this.send({ type: 'agent.clearSession', requestId, messages: opts?.messages });
+    return this.createPendingRequest<{ messagesCleared: number }>(requestId, 'clearSession');
   }
 
   // ─── Event registration ────────────────────────────────────────
 
-  /** Register a callback invoked for every incoming room message. */
   onMessage(callback: MessageCallback): void {
     this.messageCallbacks.push(callback);
   }
 
-  /** Register a callback invoked for task lifecycle events. */
-  onTaskEvent(callback: TaskEventCallback): void {
-    this.taskEventCallbacks.push(callback);
+  onBadge(callback: BadgeCallback): void {
+    this.badgeCallbacks.push(callback);
   }
 
-  /** Register a callback invoked on (re)connection. */
   onConnected(callback: VoidCallback): void {
     this.connectedCallbacks.push(callback);
   }
 
-  /** Register a callback invoked when the connection drops. */
   onDisconnected(callback: VoidCallback): void {
     this.disconnectedCallbacks.push(callback);
   }
@@ -403,9 +258,33 @@ export class AgentConnection {
     this.ws.send(encodeMessage(msg));
   }
 
-  /** Send without throwing — used for internal/lifecycle messages where failure is expected. */
   private trySend(msg: AgentMessage): void {
-    try { this.send(msg); } catch { /* connection down — expected during reconnect */ }
+    try { this.send(msg); } catch { /* connection down */ }
+  }
+
+  private createPendingRequest<T>(requestId: string, name: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(requestId);
+        reject(new Error(`${name} request timed out`));
+      }, 10_000);
+      timer.unref();
+
+      this.pendingRequests.set(requestId, {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        timer,
+      });
+    });
+  }
+
+  private resolvePending(requestId: string, value: unknown): boolean {
+    const pending = this.pendingRequests.get(requestId);
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    this.pendingRequests.delete(requestId);
+    pending.resolve(value);
+    return true;
   }
 
   private handleServerMessage(msg: ServerMessage): void {
@@ -414,119 +293,62 @@ export class AgentConnection {
         log(`Registered with hub (peerId=${msg.peerId}, server=${msg.serverVersion})`);
         break;
 
-      case 'peers': {
-        const pending = this.pendingRequests.get(msg.requestId);
-        if (pending) {
-          clearTimeout(pending.timer);
-          this.pendingRequests.delete(msg.requestId);
-          pending.resolve((msg as PeersMessage).peers);
-        }
-        break;
-      }
-
-      case 'task.detail': {
-        const pending = this.pendingRequests.get(msg.requestId);
-        if (pending) {
-          clearTimeout(pending.timer);
-          this.pendingRequests.delete(msg.requestId);
-          pending.resolve((msg as TaskDetailMessage).task);
-        }
-        break;
-      }
-
-      case 'tasks': {
-        const pending = this.pendingRequests.get(msg.requestId);
-        if (pending) {
-          clearTimeout(pending.timer);
-          this.pendingRequests.delete(msg.requestId);
-          pending.resolve({ tasks: (msg as TasksMessage).tasks });
-        }
-        break;
-      }
-
-      case 'session.cleared': {
-        const pending = this.pendingRequests.get(msg.requestId);
-        if (pending) {
-          clearTimeout(pending.timer);
-          this.pendingRequests.delete(msg.requestId);
-          const cleared = msg as SessionClearedMessage;
-          pending.resolve({ messagesCleared: cleared.messagesCleared, tasksArchived: cleared.tasksArchived });
-        }
-        break;
-      }
-
-      case 'digest.requested': {
-        const pending = this.pendingRequests.get(msg.requestId);
-        if (pending) {
-          clearTimeout(pending.timer);
-          this.pendingRequests.delete(msg.requestId);
-          pending.resolve({ taskId: msg.taskId, messageCount: msg.messageCount, messagesCleared: msg.messagesCleared });
-        }
-        break;
-      }
-
-      case 'room.joined':
-        this.currentRoomId = msg.roomId;
-        log(`Joined room "${msg.name}" (${msg.roomId})`);
+      case 'peers':
+        this.resolvePending(msg.requestId, (msg as PeersMessage).peers);
         break;
 
-      case 'room.created':
-        log(`Room created: "${msg.name}" (${msg.roomId})`);
-        break;
-
-      case 'room.message':
+      case 'channel.message':
         for (const cb of this.messageCallbacks) {
-          try { cb(msg as RoomMessageMessage); } catch { /* swallow */ }
+          try { cb(msg as ChannelMessageMessage); } catch { /* swallow */ }
         }
         break;
 
-      case 'task.created': {
-        // If this is a direct response to our createTask request, resolve the pending Promise
-        const created = msg as TaskCreatedMessage;
-        if (created.requestId) {
-          const pending = this.pendingRequests.get(created.requestId);
-          if (pending) {
-            clearTimeout(pending.timer);
-            this.pendingRequests.delete(created.requestId);
-            pending.resolve(created.task);
-            break;  // Don't also fire task event callbacks for the direct response
-          }
-        }
-        // Broadcast notification (no requestId) — fall through to task event callbacks
-        for (const cb of this.taskEventCallbacks) {
-          try { cb(msg as TaskEvent); } catch { /* swallow */ }
+      case 'message.badgeAdded':
+        for (const cb of this.badgeCallbacks) {
+          try { cb(msg as MessageBadgeAddedMessage); } catch { /* swallow */ }
         }
         break;
-      }
-      case 'task.claimed': {
-        // If this is a response to our claimTask request, resolve the pending Promise
-        const claimed = msg as TaskClaimedMessage;
-        if (claimed.requestId) {
-          const pending = this.pendingRequests.get(claimed.requestId);
-          if (pending) {
-            clearTimeout(pending.timer);
-            this.pendingRequests.delete(claimed.requestId);
-            pending.resolve({ taskId: claimed.taskId, context: claimed.context });
-            break;  // Don't also fire task event callbacks for the direct response
-          }
-        }
-        // Notification about someone else's claim — fall through to task event callbacks
-        for (const cb of this.taskEventCallbacks) {
-          try { cb(msg as TaskEvent); } catch { /* swallow */ }
-        }
+
+      case 'messages':
+        this.resolvePending((msg as MessagesResponseMessage).requestId, (msg as MessagesResponseMessage).messages);
         break;
-      }
-      case 'task.claimAccepted':
-      case 'task.updated':
-      case 'task.completed':
-        for (const cb of this.taskEventCallbacks) {
-          try { cb(msg as TaskEvent); } catch { /* swallow */ }
-        }
+
+      case 'task.flagged':
+        this.resolvePending((msg as TaskFlaggedMessage).requestId, {
+          messageId: (msg as TaskFlaggedMessage).messageId,
+          badges: (msg as TaskFlaggedMessage).badges,
+        });
+        break;
+
+      case 'task.claimed':
+        this.resolvePending((msg as TaskClaimedMessage).requestId, {
+          messageId: (msg as TaskClaimedMessage).messageId,
+          claimantId: (msg as TaskClaimedMessage).claimantId,
+        });
+        break;
+
+      case 'task.resolved':
+        this.resolvePending((msg as TaskResolvedMessage).requestId, {
+          messageId: (msg as TaskResolvedMessage).messageId,
+          status: (msg as TaskResolvedMessage).status,
+        });
+        break;
+
+      case 'badge.added':
+        this.resolvePending((msg as BadgeAddedMessage).requestId, {
+          messageId: (msg as BadgeAddedMessage).messageId,
+          badge: (msg as BadgeAddedMessage).badge,
+        });
+        break;
+
+      case 'session.cleared':
+        this.resolvePending((msg as SessionClearedMessage).requestId, {
+          messagesCleared: (msg as SessionClearedMessage).messagesCleared,
+        });
         break;
 
       case 'error':
         logError(`Hub error: ${msg.message}${msg.requestId ? ` (requestId=${msg.requestId})` : ''}`);
-        // If the error is tied to a pending request, reject it
         if (msg.requestId) {
           const pending = this.pendingRequests.get(msg.requestId);
           if (pending) {
@@ -565,7 +387,7 @@ export class AgentConnection {
         this.port = lock.port;
       }
     } catch {
-      // Lock file may not exist yet during hub restart — use existing port
+      // Lock file may not exist yet during hub restart
     }
   }
 
@@ -580,7 +402,6 @@ export class AgentConnection {
     }, this.reconnectDelay);
     this.reconnectTimer.unref();
 
-    // Exponential backoff: 1s -> 2s -> 4s -> 8s -> ... -> 30s max
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
   }
 }
