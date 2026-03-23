@@ -1263,7 +1263,7 @@ export async function startHub(): Promise<void> {
     const agentName = `agent-${instance.id.slice(0, 8)}`;
     const script = `tell application "Terminal"
   activate
-  do script "cd \\"${escapedPath}\\" && CROSSCHAT_AGENT_NAME=${agentName} claude crosschat"
+  do script "cd \\"${escapedPath}\\" && CROSSCHAT_NAME=${agentName} claude crosschat"
 end tell`;
 
     spawn('osascript', ['-e', script], { detached: true, stdio: 'ignore' }).unref();

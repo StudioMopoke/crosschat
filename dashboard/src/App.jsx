@@ -159,7 +159,7 @@ function MessageBadgeList({ badges }) {
         const key = badgeColorKey(badge);
         const color = BADGE_COLORS[key] || 'gray';
         return (
-          <span key={i} className={`badge badge-${badge.type}`} style={{ color }}>
+          <span key={i} className={`badge badge-${badge.type}`} data-value={badge.value} style={{ color }}>
             {badge.label || badge.value || badge.type}
           </span>
         );
@@ -650,6 +650,15 @@ export default function App() {
         }
         return m;
       }));
+      return;
+    }
+
+    // Session cleared — remove all messages for the channel
+    if (data.type === 'sessionCleared') {
+      if (data.channelId === activeChannelIdRef.current) {
+        setMessages([]);
+        setEvents([]);
+      }
       return;
     }
 

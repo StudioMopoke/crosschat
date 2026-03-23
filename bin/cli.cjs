@@ -303,15 +303,13 @@ async function status() {
   console.log("Dashboard:      http://localhost:" + hubPort);
 
   try {
-    const [peerList, taskList, roomList] = await Promise.all([
+    const [peerList, channelList] = await Promise.all([
       hubGet(hubPort, "/api/peers"),
-      hubGet(hubPort, "/api/tasks"),
-      hubGet(hubPort, "/api/rooms"),
+      hubGet(hubPort, "/api/channels"),
     ]);
 
     const peers = Array.isArray(peerList) ? peerList : [];
-    const tasks = Array.isArray(taskList) ? taskList : [];
-    const roomArr = Array.isArray(roomList) ? roomList : [];
+    const channels = Array.isArray(channelList) ? channelList : [];
 
     console.log("");
     console.log("Agents:         " + peers.length + " connected");
@@ -320,16 +318,7 @@ async function status() {
       console.log("  " + badge + " " + p.name + " — " + (p.cwd || "?"));
     }
 
-    if (tasks.length > 0) {
-      const byStatus = {};
-      for (const t of tasks) {
-        byStatus[t.status] = (byStatus[t.status] || 0) + 1;
-      }
-      const summary = Object.entries(byStatus).map(([k, v]) => v + " " + k).join(", ");
-      console.log("Tasks:          " + tasks.length + " (" + summary + ")");
-    }
-
-    console.log("Rooms:          " + roomArr.length);
+    console.log("Channels:       " + channels.length);
   } catch {
     console.log("");
     console.log("Hub not responding (port " + hubPort + ").");
@@ -456,7 +445,7 @@ async function peers() {
     const detail = p.statusDetail ? " " + p.statusDetail : "";
     console.log("  " + p.name + "  " + badge + detail);
     console.log("    ID:        " + p.peerId);
-    console.log("    Room:      " + (p.currentRoom || "—"));
+    console.log("    Channel:   " + (p.currentChannel || "general"));
     console.log("    Directory: " + (p.cwd || "—"));
     console.log("    Connected: " + (p.connectedAt ? timeAgo(p.connectedAt) : "—"));
     console.log("");
@@ -485,7 +474,7 @@ async function tasks() {
     }[t.status] || t.status.toUpperCase();
     console.log("  [" + statusTag + "] " + t.description);
     console.log("    ID:       " + t.taskId);
-    console.log("    Room:     " + (t.roomId || "—"));
+    console.log("    Channel:  " + (t.channelId || "—"));
     console.log("    Creator:  " + (t.creatorName || "—"));
     if (t.claimantName) {
       console.log("    Assignee: " + t.claimantName);
@@ -498,37 +487,27 @@ async function tasks() {
   }
 }
 
-async function rooms() {
+async function channels() {
   const port = requireHub();
-  const [roomData, peerData] = await Promise.all([
-    hubGet(port, "/api/rooms"),
+  const [channelData, peerData] = await Promise.all([
+    hubGet(port, "/api/channels"),
     hubGet(port, "/api/peers"),
   ]);
-  const roomList = Array.isArray(roomData) ? roomData : [];
+  const channelList = Array.isArray(channelData) ? channelData : [];
   const peerList = Array.isArray(peerData) ? peerData : [];
 
-  if (roomList.length === 0) {
-    console.log("No active rooms.");
+  if (channelList.length === 0) {
+    console.log("No active channels.");
     return;
   }
 
-  // Count peers per room
-  const peersPerRoom = {};
-  for (const p of peerList) {
-    const room = p.currentRoom || "general";
-    if (!peersPerRoom[room]) peersPerRoom[room] = [];
-    peersPerRoom[room].push(p.name);
-  }
-
-  console.log("Rooms (" + roomList.length + "):\n");
-  for (const r of roomList) {
-    const name = r.name || r.id;
-    const msgCount = r.messageCount != null ? r.messageCount : "?";
-    const roomPeers = peersPerRoom[name] || peersPerRoom[r.id] || [];
-    console.log("  " + name);
-    console.log("    Messages: " + msgCount + "  Agents: " + roomPeers.length);
-    if (roomPeers.length > 0) {
-      console.log("    " + roomPeers.join(", "));
+  console.log("Channels (" + channelList.length + "):\n");
+  for (const ch of channelList) {
+    const agentsInChannel = peerList.filter((p) => (p.currentChannel || "general") === ch);
+    console.log("  # " + ch);
+    console.log("    Agents: " + agentsInChannel.length);
+    if (agentsInChannel.length > 0) {
+      console.log("    " + agentsInChannel.map((a) => a.name).join(", "));
     }
     console.log("");
   }
@@ -589,10 +568,10 @@ function showHelp() {
   console.log("  crosschat restart              Restart the hub server");
   console.log("");
   console.log("Info:");
-  console.log("  crosschat status               Overview of hub, agents, tasks, rooms");
+  console.log("  crosschat status               Overview of hub, agents, and channels");
   console.log("  crosschat peers                List connected agents with details");
   console.log("  crosschat tasks [status]       List tasks (optional: open, claimed, completed, failed)");
-  console.log("  crosschat rooms                List active rooms");
+  console.log("  crosschat channels             List active channels");
   console.log("");
   console.log("  crosschat --version            Show version");
   console.log("  crosschat --help               Show this help");
@@ -633,8 +612,9 @@ switch (command) {
   case "tasks":
     tasks();
     break;
+  case "channels":
   case "rooms":
-    rooms();
+    channels();
     break;
   case "--version":
   case "-v":
