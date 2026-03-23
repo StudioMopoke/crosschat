@@ -309,6 +309,10 @@ export class AgentConnection {
         }
         break;
 
+      case 'message.updated':
+        // Badge array updated — notify via badge callbacks with the first badge as representative
+        break;
+
       case 'messages':
         this.resolvePending((msg as MessagesResponseMessage).requestId, (msg as MessagesResponseMessage).messages);
         break;
@@ -320,19 +324,33 @@ export class AgentConnection {
         });
         break;
 
-      case 'task.claimed':
-        this.resolvePending((msg as TaskClaimedMessage).requestId, {
-          messageId: (msg as TaskClaimedMessage).messageId,
-          claimantId: (msg as TaskClaimedMessage).claimantId,
-        });
+      case 'task.claimed': {
+        const claimed = msg as TaskClaimedMessage;
+        const resolvedClaim = claimed.requestId
+          ? this.resolvePending(claimed.requestId, { messageId: claimed.messageId, claimantId: claimed.claimantId })
+          : false;
+        // If not a response to our request, this is a notification to the task author
+        if (!resolvedClaim) {
+          for (const cb of this.badgeCallbacks) {
+            try { cb({ type: 'message.badgeAdded', messageId: claimed.messageId, badge: { type: 'task', value: 'claimed', addedBy: claimed.claimantId, addedAt: new Date().toISOString() } }); } catch { /* swallow */ }
+          }
+        }
         break;
+      }
 
-      case 'task.resolved':
-        this.resolvePending((msg as TaskResolvedMessage).requestId, {
-          messageId: (msg as TaskResolvedMessage).messageId,
-          status: (msg as TaskResolvedMessage).status,
-        });
+      case 'task.resolved': {
+        const resolved = msg as TaskResolvedMessage;
+        const resolvedTask = resolved.requestId
+          ? this.resolvePending(resolved.requestId, { messageId: resolved.messageId, status: resolved.status })
+          : false;
+        // If not a response to our request, this is a notification to the task author
+        if (!resolvedTask) {
+          for (const cb of this.badgeCallbacks) {
+            try { cb({ type: 'message.badgeAdded', messageId: resolved.messageId, badge: { type: 'task', value: resolved.status, addedBy: 'system', addedAt: new Date().toISOString() } }); } catch { /* swallow */ }
+          }
+        }
         break;
+      }
 
       case 'badge.added':
         this.resolvePending((msg as BadgeAddedMessage).requestId, {

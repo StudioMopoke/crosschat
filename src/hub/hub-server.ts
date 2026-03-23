@@ -36,7 +36,6 @@ const INSTANCES_FILE = path.join(CROSSCHAT_DIR, 'instances.json');
 const REGISTER_TIMEOUT_MS = 5_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const PONG_TIMEOUT_MS = 10_000;
-const CHANNEL_MESSAGE_CAP = 200;
 const IDLE_SHUTDOWN_MS = 5 * 60 * 1000; // 5 minutes with no agents → auto-shutdown
 const PERMISSION_TTL_MS = 10 * 60 * 1000;  // 10 minutes for pending permissions
 const PERMISSION_SWEEP_INTERVAL_MS = 60_000;
@@ -208,12 +207,9 @@ export async function startHub(): Promise<void> {
   const pendingPermissions = new Map<string, PendingPermission>();
   const instances = await loadInstances();
 
-  // Initialize MessageManager (replaces TaskManager + in-memory room messages)
+  // Initialize MessageManager (replaces TaskManager + in-memory channel messages)
   const messageManager = new MessageManager();
   await messageManager.init();
-
-  // Digest tracking: channelId -> taskId of currently active digest task
-  const activeDigestTasks = new Map<string, string>();
 
   // Idle shutdown: auto-shutdown when no agents are connected for IDLE_SHUTDOWN_MS
   let idleShutdownTimer: NodeJS.Timeout | null = null;
