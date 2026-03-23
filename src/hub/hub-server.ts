@@ -899,7 +899,23 @@ export async function startHub(): Promise<void> {
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
     const afterMessageId = req.query.afterMessageId as string | undefined;
     const messages = messageManager.getChannelMessages(channelId, { limit, afterMessageId });
-    res.json(messages);
+    // Transform to the same shape the WebSocket broadcast uses so the dashboard
+    // can rely on a single field name (`text`) regardless of transport.
+    const transformed = messages.map((m) => ({
+      type: 'message' as const,
+      messageId: m.messageId,
+      channelId: m.channelId,
+      threadId: m.threadId,
+      username: m.fromName,
+      text: m.content,
+      timestamp: m.timestamp,
+      source: m.source,
+      mentions: m.mentions,
+      mentionType: m.mentionType,
+      importance: m.metadata?.importance as string | undefined,
+      badges: m.badges,
+    }));
+    res.json(transformed);
   });
 
   app.post('/api/channels/:channelId/messages', async (req, res) => {

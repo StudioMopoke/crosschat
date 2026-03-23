@@ -308,6 +308,7 @@ function MessageAuthorBadges({ username, peers }) {
 // -- Mention highlighting -----------------------------------------------------
 
 function renderMessageText(text) {
+  if (!text) return text;
   const parts = text.split(/(@[\w-]+)/g);
   return parts.map((part, i) => {
     if (/^@[\w-]+$/.test(part)) {
