@@ -887,7 +887,7 @@ export async function startHub(): Promise<void> {
   // ── REST: Channels ──────────────────────────────────────────────
 
   app.get('/api/channels', (_req, res) => {
-    res.json([...channels]);
+    res.json([...channels].map((id) => ({ id, name: id })));
   });
 
   app.get('/api/channels/:channelId/messages', (req, res) => {
